@@ -1,0 +1,243 @@
+# OrbitalX
+
+> **Tor Multi‑Location for Xray**  
+
+OrbitalX is a **bash‑based** tool that runs multiple Tor exit nodes on a single server, each with a **fixed port per country**. It is designed to work alongside **Xray‑core** without touching your Xray configuration – you manually add the outbound using the port and IP that OrbitalX provides.
+
+**Key features**:
+
+- **Pre‑defined country list** with fixed ports (DE:9080, TR:9081, …)
+- **TUI (dialog) menu** for easy interactive management
+- **CLI commands** for scripting and automation
+- **Available / Active** country lists – activate only what you need
+- **Background monitoring** – checks IP quality every *N* seconds (configurable)
+- **Auto‑rotation** of exit IP when quality degrades
+- **systemd service** integration (install / update / uninstall)
+- **No interference** with Xray – you keep full control of your config
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+- Linux (Debian/Ubuntu recommended)
+- `tor`, `curl`, `nc`, `ss`, `pgrep`, `pkill`, `dialog`  
+  (the installer will prompt you to install missing packages)
+
+### Quick Install
+
+```bash
+# Clone the repository (or copy the script)
+git clone https://github.com/your-repo/orbitalx.git
+cd orbitalx
+
+# Make it executable
+chmod +x orbitalx.sh
+
+# Install (systemd service + directories)
+sudo ./orbitalx.sh install
+```
+
+After installation, the script is available as `/usr/local/bin/orbitalx` and the service `orbitalx.service` is enabled and started.
+
+---
+
+## 🖥️ Usage
+
+### TUI Mode (Interactive)
+Just run the script without any arguments:
+
+```bash
+sudo orbitalx
+```
+
+You will see a **main menu** with these options:
+
+1. Show Available Countries  
+2. Activate a Country  
+3. Show Active Status  
+4. Deactivate a Country  
+5. Set Monitor Interval  
+6. Stop All Instances  
+7. Administration (install / update / uninstall)  
+8. Exit  
+
+Navigate with the arrow keys, press `Enter` to select, and `Tab` to switch between buttons.
+
+---
+
+### CLI Mode (Command‑line)
+
+All operations are also available as commands:
+
+```bash
+sudo orbitalx <command> [arguments]
+```
+
+| Command | Description |
+|---------|-------------|
+| `install` | Install systemd service and directories |
+| `uninstall` | Remove everything (prompts for data deletion) |
+| `update` | Pull latest version from Git (if inside a repo) |
+| `add <COUNTRY>` | Activate a country (e.g., `add DE`) |
+| `remove <COUNTRY>` | Deactivate a country |
+| `status` | Show active locations with ports and IPs |
+| `available` | List countries not yet activated |
+| `set-interval <SEC>` | Change monitor interval (in seconds) |
+| `monitor` | Run the monitoring daemon (for systemd) |
+| `stop-all` | Stop all running Tor instances |
+| `help` | Show this help |
+
+#### Examples
+
+```bash
+sudo orbitalx add DE        # Activate Germany (port 9080)
+sudo orbitalx status        # See active list
+sudo orbitalx remove TR     # Deactivate Turkey
+sudo orbitalx set-interval 300  # Monitor every 5 minutes
+```
+
+---
+
+## 🗂️ File Structure
+
+| Path | Content |
+|------|---------|
+| `/etc/orbitalx/available.conf` | Countries not yet activated (`CODE:PORT`) |
+| `/etc/orbitalx/active.conf` | Active countries (`CODE:PORT:CONTROL_PORT:IP`) |
+| `/etc/orbitalx/monitor_interval.conf` | Monitor interval in seconds |
+| `/var/lib/orbitalx/<COUNTRY>/` | Dedicated Tor data directory per country |
+| `/var/log/orbitalx/` | Log files (`manager.log`, `tor_DE.log`, …) |
+| `/var/run/orbitalx/` | PID files (if needed) |
+
+---
+
+## ⚙️ Configuration
+
+### Fixed Ports Per Country
+
+The script uses a predefined mapping – you can edit the `PREDEFINED_PORTS` array in the script if you wish to change ports:
+
+```bash
+declare -A PREDEFINED_PORTS=(
+    ["DE"]=9080
+    ["TR"]=9081
+    ["US"]=9082
+    ["FR"]=9083
+    ["NL"]=9084
+    ["GB"]=9085
+    ["CA"]=9086
+    ["JP"]=9087
+    ["IT"]=9088
+    ["SE"]=9089
+    ["CH"]=9090
+    ["ES"]=9091
+)
+```
+
+### Monitor Interval
+
+Default is **600 seconds (10 minutes)**. You can change it at any time:
+
+```bash
+sudo orbitalx set-interval 300   # every 5 minutes
+```
+
+The change takes effect immediately (the systemd service is restarted).
+
+---
+
+## 🔄 How It Works
+
+1. **Activation**  
+   - When you activate a country, OrbitalX:
+     - Removes it from the `available` list.
+     - Creates a dedicated `torrc` with `ExitNodes {country}`.
+     - Starts a Tor daemon on the fixed port.
+     - Tries to obtain a **good exit IP** (quality check < 2s response).
+     - Saves the IP in `active.conf`.
+
+2. **Monitoring**  
+   - The systemd service runs the `monitor` command in the background.
+   - Every *N* seconds it checks:
+     - Is the Tor process still running? → restart if dead.
+     - Is the exit IP responding quickly? → if not, send `SIGNAL NEWNYM` to rotate the IP.
+     - After rotation, it tries up to 3 times to get a good IP.
+   - The active IP is updated in `active.conf` whenever it changes.
+
+3. **Integration with Xray**  
+   - OrbitalX **does not** modify your Xray config.
+   - After activation, you see the port and IP (e.g., `127.0.0.1:9080`).
+   - You manually add a `socks` outbound in your Xray configuration, and route traffic to it using your own rules.
+
+---
+
+## 🧪 Example Xray Outbound
+
+Once a country is active (say Germany on port 9080), add this to your Xray `outbounds` section:
+
+```json
+{
+  "outbounds": [
+    {
+      "tag": "tor-DE",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 9080
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Then use `"outboundTag": "tor-DE"` in your routing rules.
+
+---
+
+## 🛠️ Troubleshooting
+
+- **Tor fails to start**  
+  Check the log: `sudo tail -f /var/log/orbitalx/tor_DE.log`  
+  Make sure the port is not already in use.
+
+- **No IP or quality check fails**  
+  Try rotating manually: `echo -e "AUTHENTICATE \"\"\r\nSIGNAL NEWNYM\r\nQUIT" | nc 127.0.0.1 <CONTROL_PORT>`  
+  Or simply deactivate and reactivate the country.
+
+- **Service not running**  
+  `sudo systemctl status orbitalx`  
+  `sudo systemctl restart orbitalx`
+
+- **Dialog missing**  
+  The script will attempt to install it automatically. Otherwise:  
+  `sudo apt install dialog -y`
+
+---
+
+## 🔧 Uninstall
+
+To completely remove OrbitalX from your system:
+
+```bash
+sudo orbitalx uninstall
+```
+
+You will be asked whether to delete all data directories (`/etc/orbitalx`, `/var/lib/orbitalx`, `/var/log/orbitalx`).
+
+---
+
+## 📜 License
+
+MIT – feel free to use and modify.
+
+---
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome. Please keep the code clean and well‑commented.
+
