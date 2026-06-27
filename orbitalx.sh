@@ -12,6 +12,7 @@ set -e
 # ==================== GLOBALS ====================
 SCRIPT_NAME="OrbitalX"
 VERSION="3.0"
+REPO_RAW_URL="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/orbitalx.sh"
 CONFIG_DIR="/etc/orbitalx"
 DATA_DIR="/var/lib/orbitalx"
 LOG_DIR="/var/log/orbitalx"
@@ -503,9 +504,12 @@ install_tui() {
 
 # Update (TUI)
 update_tui() {
-    dialog --infobox "Updating from Git..." 5 40
-    update_core
-    dialog --msgbox "Update complete." 6 30
+    dialog --infobox "Updating OrbitalX from GitHub..." 5 40
+    if update_core; then
+        dialog --msgbox "Update completed successfully.\nService restarted." 6 40
+    else
+        dialog --msgbox "Update failed. Check logs or try manually." 6 40
+    fi
 }
 
 # Uninstall (TUI)
@@ -553,15 +557,40 @@ EOF
 
 update_core() {
     local script_path=$(realpath "$0")
-    local repo_dir=$(dirname "$script_path")
-    if [ -d "$repo_dir/.git" ]; then
-        cd "$repo_dir"
+    local script_dir=$(dirname "$script_path")
+    
+    # Check if we are inside a git repo
+    if [ -d "${script_dir}/.git" ]; then
+        print_info "Git repository detected. Pulling latest changes..."
+        cd "$script_dir"
         git pull
-        cp "$script_path" /usr/local/bin/orbitalx
-        chmod +x /usr/local/bin/orbitalx
-        systemctl restart orbitalx
+        if [ $? -eq 0 ]; then
+            print_info "Update successful (git pull)."
+            # If the script is installed via symlink, we might need to copy
+            # but we assume the script itself is the one in the repo.
+            systemctl restart orbitalx 2>/dev/null || true
+        else
+            print_error "Git pull failed."
+            return 1
+        fi
+    elif [ "$script_path" == "/usr/local/bin/orbitalx" ]; then
+        print_info "Downloading latest version from GitHub..."
+        local tmp_file="/tmp/orbitalx_new.sh"
+        curl -sL "$REPO_RAW_URL" -o "$tmp_file"
+        if [ $? -eq 0 ] && [ -s "$tmp_file" ]; then
+            # Verify it's a valid script (optional)
+            chmod +x "$tmp_file"
+            mv "$tmp_file" /usr/local/bin/orbitalx
+            print_info "Update successful. Restarting service..."
+            systemctl restart orbitalx 2>/dev/null || true
+        else
+            print_error "Download failed. Check network or repository URL."
+            rm -f "$tmp_file"
+            return 1
+        fi
     else
-        print_error "Not a Git repository."
+        print_error "OrbitalX is not installed in a standard location or not in a git repo."
+        print_info "Please install first with 'orbitalx install' or re-run the one-liner."
         return 1
     fi
 }
