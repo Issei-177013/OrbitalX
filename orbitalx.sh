@@ -188,20 +188,15 @@ get_tor_exit_ip() {
     fi
 }
 
-# Check IP quality
+# Check IP quality - returns 0 if IP is reachable within timeout
 check_ip_quality() {
     local port=$1
-    local start_time=$(date +%s%N)
     local ip=$(get_tor_exit_ip "$port")
-    local end_time=$(date +%s%N)
-    if [ -z "$ip" ]; then
-        return 1
+    if [ -n "$ip" ]; then
+        return 0   # IP is reachable
+    else
+        return 1   # IP not reachable
     fi
-    local elapsed=$(( (end_time - start_time) / 1000000 ))
-    if [ $elapsed -gt 2000 ]; then
-        return 1
-    fi
-    return 0
 }
 
 # Rotate Tor IP
@@ -224,6 +219,7 @@ activate_country() {
     local data_dir="${DATA_DIR}/${country}"
     mkdir -p "$data_dir"
     
+    # Longer circuit lifetime for stable IP
     cat > "${data_dir}/torrc" << EOF
 SocksPort 127.0.0.1:${port}
 ControlPort 127.0.0.1:${control_port}
@@ -231,8 +227,8 @@ DataDirectory ${data_dir}
 ExitNodes {${country}}
 StrictNodes 1
 NumEntryGuards 1
-NewCircuitPeriod 3600
-MaxCircuitDirtiness 3600
+NewCircuitPeriod 86400
+MaxCircuitDirtiness 86400
 EOF
 
     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
@@ -244,28 +240,23 @@ EOF
         return 1
     fi
 
+    # Try to get an IP, but don't retry too aggressively
     local exit_ip=""
     local retry=0
     while [ $retry -lt $MAX_RETRY ]; do
-        if check_ip_quality "$port"; then
-            exit_ip=$(get_tor_exit_ip "$port")
+        exit_ip=$(get_tor_exit_ip "$port")
+        if [ -n "$exit_ip" ]; then
             break
         else
-            rotate_tor_ip "$control_port"
-            sleep 5
+            sleep 2
             retry=$((retry+1))
         fi
     done
 
     if [ -z "$exit_ip" ]; then
-        exit_ip=$(get_tor_exit_ip "$port")
-        if [ -z "$exit_ip" ]; then
-            set_error "Cannot get exit IP for ${country}. Instance removed."
-            pkill -f "tor -f ${data_dir}/torrc" || true
-            rm -rf "$data_dir"
-            echo "${country}:${port}" >> "$AVAILABLE_FILE"
-            return 1
-        fi
+        # Even if no IP, we keep the instance running (monitor will handle)
+        exit_ip="unknown"
+        print_warn "Could not get exit IP for ${country} at activation, monitor will retry."
     fi
 
     echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
@@ -301,7 +292,7 @@ stop_all_instances() {
     print_info "All Tor instances stopped."
 }
 
-# Background monitor (daemon)
+# Background monitor (daemon) - only rotate if IP is completely unreachable
 monitor_daemon() {
     local interval=$(get_monitor_interval)
     while true; do
@@ -310,32 +301,34 @@ monitor_daemon() {
                 IFS=':' read -r country port control_port saved_ip <<< "$line"
                 data_dir="${DATA_DIR}/${country}"
                 
+                # Check if Tor process is running
                 if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
                     print_warn "${country} is down. Restarting..."
                     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
                     sleep 2
+                    # Try to get new IP after restart
+                    local new_ip=$(get_tor_exit_ip "$port")
+                    if [ -n "$new_ip" ] && [ "$new_ip" != "$saved_ip" ]; then
+                        sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
+                        print_info "Updated IP for ${country} after restart: ${new_ip}"
+                    fi
+                    continue
                 fi
                 
+                # Check IP reachability - only rotate if completely unreachable
                 if ! check_ip_quality "$port"; then
-                    print_warn "Poor IP quality for ${country}. Rotating..."
+                    print_warn "IP for ${country} is unreachable. Attempting to rotate..."
                     if rotate_tor_ip "$control_port"; then
                         sleep 5
-                        local retry=0
-                        local new_ip=""
-                        while [ $retry -lt $MAX_RETRY ]; do
-                            if check_ip_quality "$port"; then
-                                new_ip=$(get_tor_exit_ip "$port")
-                                break
-                            else
-                                rotate_tor_ip "$control_port"
-                                sleep 5
-                                retry=$((retry+1))
-                            fi
-                        done
+                        local new_ip=$(get_tor_exit_ip "$port")
                         if [ -n "$new_ip" ]; then
                             sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "New IP for ${country}: ${new_ip}"
+                            print_info "Rotated IP for ${country}: ${new_ip}"
+                        else
+                            print_warn "Could not get new IP for ${country} after rotation."
                         fi
+                    else
+                        print_error "Rotation failed for ${country}."
                     fi
                 fi
             done < "$ACTIVE_FILE"
@@ -458,15 +451,15 @@ show_status_tui() {
         if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
             current_ip=$(get_tor_exit_ip "$port")
             if [ -z "$current_ip" ]; then
-                echo "${country} | ${port} | ⚠️ Issue | Unknown" >> "$tmp_file"
+                echo "${country} | ${port} | ⚠️ Issue | ${saved_ip:-Unknown}" >> "$tmp_file"
             else
                 echo "${country} | ${port} | ✅ Active | ${current_ip}" >> "$tmp_file"
-                if [ "$current_ip" != "$saved_ip" ]; then
+                if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
                     sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
                 fi
             fi
         else
-            echo "${country} | ${port} | ❌ Stopped | ${saved_ip}" >> "$tmp_file"
+            echo "${country} | ${port} | ❌ Stopped | ${saved_ip:-Unknown}" >> "$tmp_file"
         fi
     done < "$ACTIVE_FILE"
     
