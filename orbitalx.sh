@@ -24,6 +24,11 @@ DEFAULT_MONITOR_INTERVAL=600
 MAX_RETRY=3
 TUI_MODE=0
 
+# Ensure we have a valid working directory (fixes "getcwd" errors)
+if ! cd . 2>/dev/null; then
+    cd /
+fi
+
 # Predefined countries with fixed ports
 declare -A PREDEFINED_PORTS=(
     ["DE"]=9080
