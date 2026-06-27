@@ -27,24 +27,66 @@ TUI_MODE=0
 # Global error message for TUI
 LAST_ERROR=""
 
-# Ordered list of countries (by port order)
-COUNTRIES_ORDERED=("DE" "TR" "US" "FR" "NL" "GB" "CA" "JP" "IT" "SE" "CH" "ES")
-
-# Predefined countries with fixed ports
-declare -A PREDEFINED_PORTS=(
-    ["DE"]=9080
-    ["TR"]=9081
-    ["US"]=9082
-    ["FR"]=9083
-    ["NL"]=9084
-    ["GB"]=9085
-    ["CA"]=9086
-    ["JP"]=9087
-    ["IT"]=9088
-    ["SE"]=9089
-    ["CH"]=9090
-    ["ES"]=9091
+# Full list of countries (35) in order as per image
+COUNTRIES_ORDERED=(
+    "TR" "US" "FR" "AT" "BE" "RO" "CA" "SG" "JP" "IE"
+    "FI" "ES" "PL" "NL" "IT" "CH" "SE" "NO" "DK" "IS"
+    "AU" "IN" "HK" "UA" "CZ" "KR" "ZA" "MX" "MY" "AZ"
+    "CY" "GR" "PT" "HU" "LU"
 )
+
+# Full country names mapping
+declare -A FULL_NAMES=(
+    ["TR"]="Turkey"
+    ["US"]="United States"
+    ["FR"]="France"
+    ["AT"]="Austria"
+    ["BE"]="Belgium"
+    ["RO"]="Romania"
+    ["CA"]="Canada"
+    ["SG"]="Singapore"
+    ["JP"]="Japan"
+    ["IE"]="Ireland"
+    ["FI"]="Finland"
+    ["ES"]="Spain"
+    ["PL"]="Poland"
+    ["NL"]="Netherlands"
+    ["IT"]="Italy"
+    ["CH"]="Switzerland"
+    ["SE"]="Sweden"
+    ["NO"]="Norway"
+    ["DK"]="Denmark"
+    ["IS"]="Iceland"
+    ["AU"]="Australia"
+    ["IN"]="India"
+    ["HK"]="Hong Kong"
+    ["UA"]="Ukraine"
+    ["CZ"]="Czech Republic"
+    ["KR"]="South Korea"
+    ["ZA"]="South Africa"
+    ["MX"]="Mexico"
+    ["MY"]="Malaysia"
+    ["AZ"]="Azerbaijan"
+    ["CY"]="Cyprus"
+    ["GR"]="Greece"
+    ["PT"]="Portugal"
+    ["HU"]="Hungary"
+    ["LU"]="Luxembourg"
+)
+
+# Assign ports starting from 9080
+declare -A PREDEFINED_PORTS
+PORT=9080
+for country in "${COUNTRIES_ORDERED[@]}"; do
+    PREDEFINED_PORTS["$country"]=$PORT
+    ((PORT++))
+done
+
+# Helper function to get full country name
+get_full_name() {
+    local code=$1
+    echo "${FULL_NAMES[$code]:-$code}"
+}
 
 # Read version from VERSION file (local or installed)
 get_version() {
@@ -143,7 +185,20 @@ check_prerequisites() {
 create_dirs() {
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR"
     
-    if [ ! -f "$AVAILABLE_FILE" ]; then
+    if [ -f "$AVAILABLE_FILE" ]; then
+        declare -A existing
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                code=$(echo "$line" | cut -d':' -f1)
+                existing["$code"]=1
+            fi
+        done < "$AVAILABLE_FILE"
+        for code in "${COUNTRIES_ORDERED[@]}"; do
+            if [ -z "${existing[$code]}" ]; then
+                echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
+            fi
+        done
+    else
         for code in "${COUNTRIES_ORDERED[@]}"; do
             echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
         done
@@ -221,7 +276,6 @@ activate_country() {
     local data_dir="${DATA_DIR}/${country}"
     mkdir -p "$data_dir"
     
-    # Stronger exit node enforcement
     cat > "${data_dir}/torrc" << EOF
 SocksPort 127.0.0.1:${port}
 ControlPort 127.0.0.1:${control_port}
@@ -243,13 +297,11 @@ EOF
         return 1
     fi
 
-    # Try up to 10 times to get correct exit country
     local exit_ip=""
     local ip_country=""
     local success=0
     
     for attempt in $(seq 1 10); do
-        # Force new circuit
         rotate_tor_ip "$control_port"
         sleep 3
         
@@ -269,8 +321,7 @@ EOF
     done
 
     if [ $success -eq 0 ]; then
-        # Failed to get correct country
-        set_error "Could not find an exit node in ${country}. Please try again later or choose another country."
+        set_error "Could not find an exit node in ${country} ($(get_full_name "$country")). Please try again later or choose another country."
         pkill -f "tor -f ${data_dir}/torrc" || true
         rm -rf "$data_dir"
         echo "${country}:${port}" >> "$AVAILABLE_FILE"
@@ -278,14 +329,14 @@ EOF
     fi
 
     echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
-    print_info "Activated ${country} on port ${port} with IP ${exit_ip} (${ip_country})."
+    print_info "Activated $(get_full_name "$country") on port ${port} with IP ${exit_ip} (${ip_country})."
     return 0
 }
 
 deactivate_country() {
     local country=$1
     if ! grep -q "^${country}:" "$ACTIVE_FILE"; then
-        set_error "Country ${country} is not active."
+        set_error "Country $(get_full_name "$country") is not active."
         return 1
     fi
     
@@ -299,7 +350,7 @@ deactivate_country() {
     sed -i "/^${country}:/d" "$ACTIVE_FILE"
     echo "${country}:${port}" >> "$AVAILABLE_FILE"
     
-    print_info "Deactivated ${country}."
+    print_info "Deactivated $(get_full_name "$country")."
     return 0
 }
 
@@ -315,19 +366,18 @@ monitor_daemon() {
             while IFS= read -r line; do
                 IFS=':' read -r country port control_port saved_ip <<< "$line"
                 data_dir="${DATA_DIR}/${country}"
+                full_name=$(get_full_name "$country")
                 
-                # Check if Tor process is running
                 if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-                    print_warn "${country} is down. Restarting..."
+                    print_warn "${full_name} is down. Restarting..."
                     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
                     sleep 5
-                    # After restart, try to get correct country
                     local new_ip=$(get_tor_exit_ip "$port")
                     if [ -n "$new_ip" ]; then
                         ip_country=$(get_ip_country "$new_ip")
                         if [ "$ip_country" = "$country" ]; then
                             sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "Restored ${country} with IP ${new_ip} (${ip_country})"
+                            print_info "Restored ${full_name} with IP ${new_ip} (${ip_country})"
                         else
                             print_error "After restart, IP ${new_ip} is in ${ip_country}, not ${country}. Manual intervention needed."
                         fi
@@ -335,9 +385,8 @@ monitor_daemon() {
                     continue
                 fi
                 
-                # Check IP reachability
                 if ! check_ip_quality "$port"; then
-                    print_warn "IP for ${country} is unreachable. Attempting to rotate..."
+                    print_warn "IP for ${full_name} is unreachable. Attempting to rotate..."
                     local rotated=0
                     for attempt in {1..3}; do
                         if rotate_tor_ip "$control_port"; then
@@ -347,7 +396,7 @@ monitor_daemon() {
                                 ip_country=$(get_ip_country "$new_ip")
                                 if [ "$ip_country" = "$country" ]; then
                                     sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Rotated IP for ${country}: ${new_ip} (${ip_country})"
+                                    print_info "✅ Rotated IP for ${full_name}: ${new_ip} (${ip_country})"
                                     rotated=1
                                     break
                                 else
@@ -363,13 +412,11 @@ monitor_daemon() {
                         print_error "Could not get valid ${country} IP after 3 rotation attempts."
                     fi
                 else
-                    # IP reachable: check country consistency
                     current_ip=$(get_tor_exit_ip "$port")
                     if [ -n "$current_ip" ]; then
                         ip_country=$(get_ip_country "$current_ip")
                         if [ "$ip_country" != "$country" ]; then
                             print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Attempting to fix..."
-                            # Force rotation
                             rotate_tor_ip "$control_port"
                             sleep 5
                             new_ip=$(get_tor_exit_ip "$port")
@@ -377,9 +424,9 @@ monitor_daemon() {
                                 new_country=$(get_ip_country "$new_ip")
                                 if [ "$new_country" = "$country" ]; then
                                     sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Forced rotation fixed IP for ${country}: ${new_ip} (${new_country})"
+                                    print_info "✅ Forced rotation fixed IP for ${full_name}: ${new_ip} (${new_country})"
                                 else
-                                    print_error "Cannot fix country for ${country}. Current IP: ${new_ip} (${new_country})"
+                                    print_error "Cannot fix country for ${full_name}. Current IP: ${new_ip} (${new_country})"
                                 fi
                             fi
                         fi
@@ -434,12 +481,13 @@ show_available_tui() {
     local items=()
     while IFS= read -r line; do
         IFS=':' read -r code port <<< "$line"
-        items+=("$code" "Port: $port")
+        full_name=$(get_full_name "$code")
+        items+=("$code" "$full_name [${code}] - Port: $port")
     done < "$AVAILABLE_FILE"
     
     dialog --title "Available Countries" \
         --menu "Select a country to view details (press Enter)" \
-        15 50 10 "${items[@]}" \
+        20 70 15 "${items[@]}" \
         2>&1 >/dev/tty
 }
 
@@ -452,11 +500,12 @@ activate_tui() {
     local items=()
     while IFS= read -r line; do
         IFS=':' read -r code port <<< "$line"
-        items+=("$code" "Port: $port")
+        full_name=$(get_full_name "$code")
+        items+=("$code" "$full_name [${code}] - Port: $port")
     done < "$AVAILABLE_FILE"
     
     local country=$(dialog --clear --title "Activate Country" \
-        --menu "Select a country to activate" 15 50 10 "${items[@]}" \
+        --menu "Select a country to activate" 20 70 15 "${items[@]}" \
         2>&1 >/dev/tty)
     
     if [ -n "$country" ]; then
@@ -468,12 +517,12 @@ activate_tui() {
             ) &
             pid=$!
             
-            dialog --title "Activating ${country}..." --infobox "Please wait..." 5 40
+            dialog --title "Activating $(get_full_name "$country")..." --infobox "Please wait..." 5 40
             wait $pid
             exit_code=$(cat /tmp/orbitalx_activate.exit 2>/dev/null || echo 1)
             
             if [ $exit_code -eq 0 ]; then
-                dialog --msgbox "✅ ${country} activated successfully!\n\nUse port ${port} in Xray outbound." 8 50
+                dialog --msgbox "✅ $(get_full_name "$country") activated successfully!\n\nUse port ${port} in Xray outbound." 8 50
             else
                 show_error_tui
             fi
@@ -493,28 +542,29 @@ show_status_tui() {
     local tmp_file="/tmp/orbitalx_status.txt"
     > "$tmp_file"
     
-    echo "Country | Port | Status | Exit IP | Country" >> "$tmp_file"
-    echo "--------|------|--------|---------|---------" >> "$tmp_file"
+    printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "Country" "Port" "Status" "Exit IP" "Code" >> "$tmp_file"
+    printf "%s\n" "----------------------|--------|------------|-----------------|----------" >> "$tmp_file"
     
     while IFS= read -r line; do
         IFS=':' read -r country port control_port saved_ip <<< "$line"
+        full_name=$(get_full_name "$country")
         if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
             current_ip=$(get_tor_exit_ip "$port")
             if [ -z "$current_ip" ]; then
-                echo "${country} | ${port} | ⚠️ Issue | ${saved_ip:-Unknown} | -" >> "$tmp_file"
+                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
             else
                 ip_country=$(get_ip_country "$current_ip")
-                echo "${country} | ${port} | ✅ Active | ${current_ip} | ${ip_country:-Unknown}" >> "$tmp_file"
+                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "✅ Active" "$current_ip" "${ip_country:-?}" >> "$tmp_file"
                 if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
                     sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
                 fi
             fi
         else
-            echo "${country} | ${port} | ❌ Stopped | ${saved_ip:-Unknown} | -" >> "$tmp_file"
+            printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
         fi
     done < "$ACTIVE_FILE"
     
-    dialog --title "Active Locations" --textbox "$tmp_file" 20 65
+    dialog --title "Active Locations" --textbox "$tmp_file" 25 80
     rm -f "$tmp_file"
 }
 
@@ -527,11 +577,12 @@ deactivate_tui() {
     local items=()
     while IFS= read -r line; do
         IFS=':' read -r code port rest <<< "$line"
-        items+=("$code" "Port: $port")
+        full_name=$(get_full_name "$code")
+        items+=("$code" "$full_name [${code}] - Port: $port")
     done < "$ACTIVE_FILE"
     
     local country=$(dialog --clear --title "Deactivate Country" \
-        --menu "Select a country to deactivate" 15 50 10 "${items[@]}" \
+        --menu "Select a country to deactivate" 20 70 15 "${items[@]}" \
         2>&1 >/dev/tty)
     
     if [ -n "$country" ]; then
@@ -541,12 +592,12 @@ deactivate_tui() {
         ) &
         pid=$!
         
-        dialog --title "Deactivating ${country}..." --infobox "Please wait..." 5 40
+        dialog --title "Deactivating $(get_full_name "$country")..." --infobox "Please wait..." 5 40
         wait $pid
         exit_code=$(cat /tmp/orbitalx_deactivate.exit 2>/dev/null || echo 1)
         
         if [ $exit_code -eq 0 ]; then
-            dialog --msgbox "✅ ${country} deactivated and moved back to available list." 6 50
+            dialog --msgbox "✅ $(get_full_name "$country") deactivated and moved back to available list." 6 50
         else
             show_error_tui
         fi
@@ -785,7 +836,7 @@ cli_mode() {
             fi
             country=$(echo "$2" | tr '[:lower:]' '[:upper:]')
             if ! grep -q "^${country}:" "$AVAILABLE_FILE"; then
-                print_error "Country not available."
+                print_error "Country $(get_full_name "$country") not available."
                 exit 1
             fi
             port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
@@ -796,12 +847,17 @@ cli_mode() {
                 print_error "Usage: orbitalx remove <COUNTRY>"
                 exit 1
             fi
-            deactivate_country "$(echo "$2" | tr '[:lower:]' '[:upper:]')"
+            country=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+            deactivate_country "$country"
             ;;
         status)
             if [ -s "$ACTIVE_FILE" ]; then
                 echo "Active Locations:"
-                cat "$ACTIVE_FILE"
+                while IFS= read -r line; do
+                    IFS=':' read -r code port control_port ip <<< "$line"
+                    full_name=$(get_full_name "$code")
+                    echo "$full_name [$code] | Port: $port | IP: $ip"
+                done < "$ACTIVE_FILE"
             else
                 echo "No active locations."
             fi
@@ -809,7 +865,11 @@ cli_mode() {
         available)
             if [ -s "$AVAILABLE_FILE" ]; then
                 echo "Available Countries:"
-                cat "$AVAILABLE_FILE"
+                while IFS= read -r line; do
+                    IFS=':' read -r code port <<< "$line"
+                    full_name=$(get_full_name "$code")
+                    echo "$full_name [$code] - Port: $port"
+                done < "$AVAILABLE_FILE"
             else
                 echo "No available countries."
             fi
