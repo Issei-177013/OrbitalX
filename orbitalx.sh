@@ -22,6 +22,7 @@ AVAILABLE_FILE="${CONFIG_DIR}/available.conf"
 MONITOR_INTERVAL_FILE="${CONFIG_DIR}/monitor_interval.conf"
 DEFAULT_MONITOR_INTERVAL=600
 MAX_RETRY=3
+TUI_MODE=0
 
 # Predefined countries with fixed ports
 declare -A PREDEFINED_PORTS=(
@@ -53,18 +54,24 @@ log() {
 }
 
 print_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
     log "[INFO] $1"
+    if [ $TUI_MODE -eq 0 ]; then
+        echo -e "${GREEN}[INFO]${NC} $1"
+    fi
 }
 
 print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
     log "[WARN] $1"
+    if [ $TUI_MODE -eq 0 ]; then
+        echo -e "${YELLOW}[WARN]${NC} $1"
+    fi
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
     log "[ERROR] $1"
+    if [ $TUI_MODE -eq 0 ]; then
+        echo -e "${RED}[ERROR]${NC} $1"
+    fi
 }
 
 # Check if running as root (for privileged commands)
@@ -169,14 +176,13 @@ rotate_tor_ip() {
     return $?
 }
 
-# ==================== CORE FUNCTIONS (used by both CLI and TUI) ====================
+# ==================== CORE FUNCTIONS ====================
 
 # Activate a country (given code and port)
 activate_country() {
     local country=$1
     local port=$2
     
-    # Remove from available
     sed -i "/^${country}:/d" "$AVAILABLE_FILE"
     
     local control_port=$(find_control_port)
@@ -203,7 +209,6 @@ EOF
         return 1
     fi
 
-    # Find good IP
     local exit_ip=""
     local retry=0
     while [ $retry -lt $MAX_RETRY ]; do
@@ -346,16 +351,16 @@ show_available_tui() {
         return
     fi
     
-    local list=""
-    local i=1
+    local items=()
     while IFS= read -r line; do
         IFS=':' read -r code port <<< "$line"
-        list="${list}${i} \"${code} (Port: ${port})\" "
-        ((i++))
+        items+=("$code" "Port: $port")
     done < "$AVAILABLE_FILE"
     
-    eval dialog --title "Available Countries" --menu "Select to view details" 15 50 10 $list 2>&1 >/dev/tty
-    # Just show and return
+    dialog --title "Available Countries" \
+        --menu "Select a country to view details (press Enter)" \
+        15 50 10 "${items[@]}" \
+        2>&1 >/dev/tty
 }
 
 # Activate a country (select from available)
@@ -378,14 +383,12 @@ activate_tui() {
     if [ -n "$country" ]; then
         local port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
         if [ -n "$port" ]; then
-            # Run activation in background with progress
             (
                 activate_country "$country" "$port" > /tmp/orbitalx_activate.log 2>&1
                 echo $? > /tmp/orbitalx_activate.exit
             ) &
             pid=$!
             
-            # Show spinner
             dialog --title "Activating ${country}..." --infobox "Please wait..." 5 40
             wait $pid
             exit_code=$(cat /tmp/orbitalx_activate.exit 2>/dev/null || echo 1)
@@ -409,25 +412,31 @@ show_status_tui() {
         return
     fi
     
-    local status_text=""
+    local tmp_file="/tmp/orbitalx_status.txt"
+    > "$tmp_file"
+    
+    echo "Country | Port | Status | Exit IP" >> "$tmp_file"
+    echo "--------|------|--------|---------" >> "$tmp_file"
+    
     while IFS= read -r line; do
         IFS=':' read -r country port control_port saved_ip <<< "$line"
         if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
             current_ip=$(get_tor_exit_ip "$port")
             if [ -z "$current_ip" ]; then
-                status_text="${status_text}${country} | ${port} | ⚠️ Issue | Unknown\n"
+                echo "${country} | ${port} | ⚠️ Issue | Unknown" >> "$tmp_file"
             else
-                status_text="${status_text}${country} | ${port} | ✅ Active | ${current_ip}\n"
+                echo "${country} | ${port} | ✅ Active | ${current_ip}" >> "$tmp_file"
                 if [ "$current_ip" != "$saved_ip" ]; then
                     sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
                 fi
             fi
         else
-            status_text="${status_text}${country} | ${port} | ❌ Stopped | ${saved_ip}\n"
+            echo "${country} | ${port} | ❌ Stopped | ${saved_ip}" >> "$tmp_file"
         fi
     done < "$ACTIVE_FILE"
     
-    dialog --title "Active Locations" --msgbox "Country | Port | Status | Exit IP\n----------------------------------------\n${status_text}" 20 60
+    dialog --title "Active Locations" --textbox "$tmp_file" 20 60
+    rm -f "$tmp_file"
 }
 
 # Deactivate a country
@@ -448,8 +457,22 @@ deactivate_tui() {
         2>&1 >/dev/tty)
     
     if [ -n "$country" ]; then
-        deactivate_country "$country"
-        dialog --msgbox "Country ${country} deactivated and moved back to available list." 6 50
+        (
+            deactivate_country "$country" > /tmp/orbitalx_deactivate.log 2>&1
+            echo $? > /tmp/orbitalx_deactivate.exit
+        ) &
+        pid=$!
+        
+        dialog --title "Deactivating ${country}..." --infobox "Please wait..." 5 40
+        wait $pid
+        exit_code=$(cat /tmp/orbitalx_deactivate.exit 2>/dev/null || echo 1)
+        
+        if [ $exit_code -eq 0 ]; then
+            dialog --msgbox "✅ ${country} deactivated and moved back to available list." 6 50
+        else
+            dialog --msgbox "❌ Failed to deactivate ${country}.\nCheck logs." 6 40
+        fi
+        rm -f /tmp/orbitalx_deactivate.log /tmp/orbitalx_deactivate.exit
     fi
 }
 
@@ -473,8 +496,14 @@ set_interval_tui() {
 stop_all_tui() {
     dialog --yesno "Are you sure you want to stop all active Tor instances?" 6 50
     if [ $? -eq 0 ]; then
-        stop_all_instances
+        (
+            stop_all_instances > /tmp/orbitalx_stop.log 2>&1
+        ) &
+        pid=$!
+        dialog --infobox "Stopping all instances..." 5 40
+        wait $pid
         dialog --msgbox "All instances stopped." 6 30
+        rm -f /tmp/orbitalx_stop.log
     fi
 }
 
@@ -507,9 +536,9 @@ admin_menu() {
 install_tui() {
     dialog --infobox "Installing OrbitalX..." 5 40
     if install_core; then
-        dialog --msgbox "Installation complete.\nService enabled: orbitalx.service" 6 50
+        dialog --msgbox "✅ Installation complete.\nService enabled: orbitalx.service" 6 50
     else
-        dialog --msgbox "Installation failed. Check logs." 6 40
+        dialog --msgbox "❌ Installation failed. Check logs." 6 40
     fi
 }
 
@@ -517,9 +546,9 @@ install_tui() {
 update_tui() {
     dialog --infobox "Updating OrbitalX from GitHub..." 5 40
     if update_core; then
-        dialog --msgbox "Update completed successfully.\nService restarted." 6 40
+        dialog --msgbox "✅ Update completed successfully.\nService restarted." 6 40
     else
-        dialog --msgbox "Update failed. Check logs or try manually." 6 40
+        dialog --msgbox "❌ Update failed. Check logs or try manually." 6 40
     fi
 }
 
@@ -543,7 +572,6 @@ install_core() {
     check_prerequisites || return 1
     create_dirs
 
-    # Download the script from GitHub
     print_info "Downloading OrbitalX from GitHub..."
     local tmp_file="/tmp/orbitalx_install.sh"
     curl -sL "$REPO_RAW_URL" -o "$tmp_file"
@@ -554,7 +582,6 @@ install_core() {
     chmod +x "$tmp_file"
     mv "$tmp_file" /usr/local/bin/orbitalx
 
-    # Create systemd service
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
 Description=OrbitalX - Tor Multi-Location Manager
@@ -585,14 +612,12 @@ update_core() {
     local script_path=$(realpath "$0")
     local script_dir=$(dirname "$script_path")
     
-    # Check if we are inside a git repo
     if [ -d "${script_dir}/.git" ]; then
         print_info "Git repository detected. Pulling latest changes..."
         cd "$script_dir"
         git pull
         if [ $? -eq 0 ]; then
             print_info "Git pull successful."
-            # If the script is installed in /usr/local/bin, copy the updated version
             if [ -f "/usr/local/bin/orbitalx" ]; then
                 cp "$script_path" /usr/local/bin/orbitalx
                 chmod +x /usr/local/bin/orbitalx
@@ -638,7 +663,7 @@ uninstall_core() {
     fi
 }
 
-# ==================== CLI COMMANDS (for compatibility) ====================
+# ==================== CLI COMMANDS ====================
 
 cli_mode() {
     case "$1" in
@@ -652,7 +677,6 @@ cli_mode() {
             update_core
             ;;
         add)
-            # CLI add: expects country code as $2
             if [ -z "$2" ]; then
                 print_error "Usage: orbitalx add <COUNTRY>"
                 exit 1
@@ -732,14 +756,14 @@ EOF
 
 # ==================== MAIN ====================
 
-# If no arguments, run TUI
 if [ $# -eq 0 ]; then
+    TUI_MODE=1
     check_dialog
     check_prerequisites || exit 1
     create_dirs
     main_menu
 else
-    # CLI mode
+    TUI_MODE=0
     cli_mode "$@"
 fi
 
