@@ -24,11 +24,44 @@ OrbitalX is a **bash‑based** tool that runs multiple Tor exit nodes on a singl
 - `tor`, `curl`, `nc`, `ss`, `pgrep`, `pkill`, `dialog`  
   (the installer will prompt you to install missing packages)
 
-### Quick Install
+## 🚀 Quick Start (Run & Install from Menu)
+
+The easiest way to try OrbitalX is to run it directly from the web:
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Issei-177013/orbitalx/main/orbitalx.sh)
+```
+
+This will:
+- Download the latest script
+- Launch the **TUI menu** without installing anything yet  
+- From the menu, choose `7) Administration` → `1) Install (full setup)`  
+- The script will then install itself as a systemd service, create directories, and start the monitoring daemon.
+
+> **Note**: Replace the URL with the actual raw link to your repository.
+
+---
+
+## ⚡ Direct Install (One‑Step)
+
+If you prefer to install immediately without opening the menu first, run:
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Issei-177013/orbitalx/main/orbitalx.sh) install
+```
+
+This will:
+- Download the script
+- Run the `install` command directly
+- Set up everything and enable the service
+
+---
+
+## 📦 Full Installation (Manual)
 
 ```bash
 # Clone the repository (or copy the script)
-git clone https://github.com/your-repo/orbitalx.git
+git clone https://github.com/Issei-177013/orbitalx.git
 cd orbitalx
 
 # Make it executable
