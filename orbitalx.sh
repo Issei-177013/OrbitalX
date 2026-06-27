@@ -67,6 +67,14 @@ print_error() {
     log "[ERROR] $1"
 }
 
+# Check if running as root (for privileged commands)
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        print_error "This command requires root privileges. Please run with sudo."
+        exit 1
+    fi
+}
+
 # Check if dialog is installed
 check_dialog() {
     if ! command -v dialog &> /dev/null; then
@@ -498,8 +506,11 @@ admin_menu() {
 # Install (TUI)
 install_tui() {
     dialog --infobox "Installing OrbitalX..." 5 40
-    install_core
-    dialog --msgbox "Installation complete.\nService enabled: orbitalx.service" 6 50
+    if install_core; then
+        dialog --msgbox "Installation complete.\nService enabled: orbitalx.service" 6 50
+    else
+        dialog --msgbox "Installation failed. Check logs." 6 40
+    fi
 }
 
 # Update (TUI)
@@ -528,9 +539,22 @@ uninstall_tui() {
 # ==================== CORE INSTALL/UPDATE/UNINSTALL ====================
 
 install_core() {
+    check_root
     check_prerequisites || return 1
     create_dirs
-    
+
+    # Download the script from GitHub
+    print_info "Downloading OrbitalX from GitHub..."
+    local tmp_file="/tmp/orbitalx_install.sh"
+    curl -sL "$REPO_RAW_URL" -o "$tmp_file"
+    if [ $? -ne 0 ] || [ ! -s "$tmp_file" ]; then
+        print_error "Failed to download script from GitHub."
+        return 1
+    fi
+    chmod +x "$tmp_file"
+    mv "$tmp_file" /usr/local/bin/orbitalx
+
+    # Create systemd service
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
 Description=OrbitalX - Tor Multi-Location Manager
@@ -548,14 +572,16 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-    cp "$0" /usr/local/bin/orbitalx
-    chmod +x /usr/local/bin/orbitalx
     systemctl daemon-reload
     systemctl enable orbitalx.service
     systemctl start orbitalx.service
+
+    print_info "Installation complete. Service enabled and started."
+    return 0
 }
 
 update_core() {
+    check_root
     local script_path=$(realpath "$0")
     local script_dir=$(dirname "$script_path")
     
@@ -565,9 +591,13 @@ update_core() {
         cd "$script_dir"
         git pull
         if [ $? -eq 0 ]; then
-            print_info "Update successful (git pull)."
-            # If the script is installed via symlink, we might need to copy
-            # but we assume the script itself is the one in the repo.
+            print_info "Git pull successful."
+            # If the script is installed in /usr/local/bin, copy the updated version
+            if [ -f "/usr/local/bin/orbitalx" ]; then
+                cp "$script_path" /usr/local/bin/orbitalx
+                chmod +x /usr/local/bin/orbitalx
+                print_info "Updated /usr/local/bin/orbitalx"
+            fi
             systemctl restart orbitalx 2>/dev/null || true
         else
             print_error "Git pull failed."
@@ -578,7 +608,6 @@ update_core() {
         local tmp_file="/tmp/orbitalx_new.sh"
         curl -sL "$REPO_RAW_URL" -o "$tmp_file"
         if [ $? -eq 0 ] && [ -s "$tmp_file" ]; then
-            # Verify it's a valid script (optional)
             chmod +x "$tmp_file"
             mv "$tmp_file" /usr/local/bin/orbitalx
             print_info "Update successful. Restarting service..."
@@ -593,9 +622,11 @@ update_core() {
         print_info "Please install first with 'orbitalx install' or re-run the one-liner."
         return 1
     fi
+    return 0
 }
 
 uninstall_core() {
+    check_root
     systemctl stop orbitalx 2>/dev/null || true
     systemctl disable orbitalx 2>/dev/null || true
     rm -f /etc/systemd/system/orbitalx.service
