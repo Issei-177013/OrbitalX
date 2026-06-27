@@ -2,7 +2,7 @@
 
 # ===========================================================
 # OrbitalX - Tor Multi-Location Manager for Xray
-# Version : 3.0
+# Version: Read from VERSION file
 # Description: TUI-based management with predefined countries
 #              and fixed ports. Monitor interval configurable.
 # ===========================================================
@@ -11,8 +11,8 @@ set -e
 
 # ==================== GLOBALS ====================
 SCRIPT_NAME="OrbitalX"
-VERSION="3.0"
-REPO_RAW_URL="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/orbitalx.sh"
+REPO_RAW_URL_SCRIPT="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/orbitalx.sh"
+REPO_RAW_URL_VERSION="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/VERSION"
 CONFIG_DIR="/etc/orbitalx"
 DATA_DIR="/var/lib/orbitalx"
 LOG_DIR="/var/log/orbitalx"
@@ -23,6 +23,20 @@ MONITOR_INTERVAL_FILE="${CONFIG_DIR}/monitor_interval.conf"
 DEFAULT_MONITOR_INTERVAL=600
 MAX_RETRY=3
 TUI_MODE=0
+
+# Read version from VERSION file (local or installed)
+get_version() {
+    local script_dir="$(dirname "$0")"
+    if [ -f "$script_dir/VERSION" ]; then
+        cat "$script_dir/VERSION" | tr -d '\n\r'
+    elif [ -f "VERSION" ]; then
+        cat "VERSION" | tr -d '\n\r'
+    else
+        echo "0.0.0"   # Fallback
+    fi
+}
+
+VERSION=$(get_version)
 
 # Ensure we have a valid working directory (fixes "getcwd" errors)
 if ! cd . 2>/dev/null; then
@@ -578,15 +592,29 @@ install_core() {
     create_dirs
 
     print_info "Downloading OrbitalX from GitHub..."
-    local tmp_file="/tmp/orbitalx_install.sh"
-    curl -sL "$REPO_RAW_URL" -o "$tmp_file"
-    if [ $? -ne 0 ] || [ ! -s "$tmp_file" ]; then
-        print_error "Failed to download script from GitHub."
+    local tmp_script="/tmp/orbitalx_install.sh"
+    local tmp_version="/tmp/orbitalx_version"
+
+    # Download script
+    curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
+    if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
+        print_error "Failed to download script."
         return 1
     fi
-    chmod +x "$tmp_file"
-    mv "$tmp_file" /usr/local/bin/orbitalx
 
+    # Download VERSION file
+    curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version"
+    if [ $? -eq 0 ] && [ -s "$tmp_version" ]; then
+        cp "$tmp_version" /usr/local/bin/VERSION
+    else
+        echo "0.0.0" > /usr/local/bin/VERSION
+        print_warn "Could not download VERSION, using fallback 0.0.0"
+    fi
+
+    chmod +x "$tmp_script"
+    mv "$tmp_script" /usr/local/bin/orbitalx
+
+    # Create systemd service
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
 Description=OrbitalX - Tor Multi-Location Manager
@@ -623,10 +651,15 @@ update_core() {
         git pull
         if [ $? -eq 0 ]; then
             print_info "Git pull successful."
+            # Update installed files if present
             if [ -f "/usr/local/bin/orbitalx" ]; then
                 cp "$script_path" /usr/local/bin/orbitalx
                 chmod +x /usr/local/bin/orbitalx
                 print_info "Updated /usr/local/bin/orbitalx"
+            fi
+            if [ -f "/usr/local/bin/VERSION" ] && [ -f "$script_dir/VERSION" ]; then
+                cp "$script_dir/VERSION" /usr/local/bin/VERSION
+                print_info "Updated /usr/local/bin/VERSION"
             fi
             systemctl restart orbitalx 2>/dev/null || true
         else
@@ -635,18 +668,27 @@ update_core() {
         fi
     elif [ "$script_path" == "/usr/local/bin/orbitalx" ]; then
         print_info "Downloading latest version from GitHub..."
-        local tmp_file="/tmp/orbitalx_new.sh"
-        curl -sL "$REPO_RAW_URL" -o "$tmp_file"
-        if [ $? -eq 0 ] && [ -s "$tmp_file" ]; then
-            chmod +x "$tmp_file"
-            mv "$tmp_file" /usr/local/bin/orbitalx
-            print_info "Update successful. Restarting service..."
-            systemctl restart orbitalx 2>/dev/null || true
-        else
-            print_error "Download failed. Check network or repository URL."
-            rm -f "$tmp_file"
+        local tmp_script="/tmp/orbitalx_new.sh"
+        local tmp_version="/tmp/orbitalx_new_version"
+        
+        curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
+        if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
+            print_error "Failed to download script."
+            rm -f "$tmp_script"
             return 1
         fi
+        
+        curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version"
+        if [ $? -eq 0 ] && [ -s "$tmp_version" ]; then
+            cp "$tmp_version" /usr/local/bin/VERSION
+        else
+            print_warn "Could not download VERSION, keeping existing."
+        fi
+        
+        chmod +x "$tmp_script"
+        mv "$tmp_script" /usr/local/bin/orbitalx
+        print_info "Update successful. Restarting service..."
+        systemctl restart orbitalx 2>/dev/null || true
     else
         print_error "OrbitalX is not installed in a standard location or not in a git repo."
         print_info "Please install first with 'orbitalx install' or re-run the one-liner."
@@ -661,6 +703,7 @@ uninstall_core() {
     systemctl disable orbitalx 2>/dev/null || true
     rm -f /etc/systemd/system/orbitalx.service
     rm -f /usr/local/bin/orbitalx
+    rm -f /usr/local/bin/VERSION
     systemctl daemon-reload
     
     if [ $1 -eq 0 ]; then
