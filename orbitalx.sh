@@ -221,6 +221,7 @@ activate_country() {
     local data_dir="${DATA_DIR}/${country}"
     mkdir -p "$data_dir"
     
+    # Stronger exit node enforcement
     cat > "${data_dir}/torrc" << EOF
 SocksPort 127.0.0.1:${port}
 ControlPort 127.0.0.1:${control_port}
@@ -230,6 +231,7 @@ StrictNodes 1
 NumEntryGuards 1
 NewCircuitPeriod 86400
 MaxCircuitDirtiness 86400
+CircuitBuildTimeout 30
 EOF
 
     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
@@ -241,32 +243,42 @@ EOF
         return 1
     fi
 
+    # Try up to 10 times to get correct exit country
     local exit_ip=""
-    local attempt=0
-    while [ $attempt -lt 5 ]; do
+    local ip_country=""
+    local success=0
+    
+    for attempt in $(seq 1 10); do
+        # Force new circuit
+        rotate_tor_ip "$control_port"
+        sleep 3
+        
         exit_ip=$(get_tor_exit_ip "$port")
         if [ -n "$exit_ip" ]; then
-            local ip_country=$(get_ip_country "$exit_ip")
+            ip_country=$(get_ip_country "$exit_ip")
             if [ "$ip_country" = "$country" ]; then
+                success=1
                 break
             else
-                print_warn "IP $exit_ip is in $ip_country, not $country. Rotating..."
-                rotate_tor_ip "$control_port"
-                sleep 3
+                print_warn "Attempt $attempt: IP $exit_ip is in $ip_country, not $country. Retrying..."
             fi
         else
-            sleep 2
+            print_warn "Attempt $attempt: No IP yet. Retrying..."
         fi
-        attempt=$((attempt+1))
+        sleep 2
     done
 
-    if [ -z "$exit_ip" ]; then
-        exit_ip="unknown"
-        print_warn "Could not get valid IP for ${country} at activation."
+    if [ $success -eq 0 ]; then
+        # Failed to get correct country
+        set_error "Could not find an exit node in ${country}. Please try again later or choose another country."
+        pkill -f "tor -f ${data_dir}/torrc" || true
+        rm -rf "$data_dir"
+        echo "${country}:${port}" >> "$AVAILABLE_FILE"
+        return 1
     fi
 
     echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
-    print_info "Activated ${country} on port ${port} with IP ${exit_ip}."
+    print_info "Activated ${country} on port ${port} with IP ${exit_ip} (${ip_country})."
     return 0
 }
 
@@ -304,19 +316,20 @@ monitor_daemon() {
                 IFS=':' read -r country port control_port saved_ip <<< "$line"
                 data_dir="${DATA_DIR}/${country}"
                 
-                # First: check if Tor process is running
+                # Check if Tor process is running
                 if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
                     print_warn "${country} is down. Restarting..."
                     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
-                    sleep 2
+                    sleep 5
+                    # After restart, try to get correct country
                     local new_ip=$(get_tor_exit_ip "$port")
                     if [ -n "$new_ip" ]; then
-                        local ip_country=$(get_ip_country "$new_ip")
+                        ip_country=$(get_ip_country "$new_ip")
                         if [ "$ip_country" = "$country" ]; then
                             sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "Updated IP for ${country} after restart: ${new_ip} (${ip_country})"
+                            print_info "Restored ${country} with IP ${new_ip} (${ip_country})"
                         else
-                            print_warn "New IP after restart is in ${ip_country}, not ${country}. Will try rotation later."
+                            print_error "After restart, IP ${new_ip} is in ${ip_country}, not ${country}. Manual intervention needed."
                         fi
                     fi
                     continue
@@ -324,14 +337,14 @@ monitor_daemon() {
                 
                 # Check IP reachability
                 if ! check_ip_quality "$port"; then
-                    print_warn "IP for ${country} is completely unreachable. Attempting to rotate..."
+                    print_warn "IP for ${country} is unreachable. Attempting to rotate..."
                     local rotated=0
                     for attempt in {1..3}; do
                         if rotate_tor_ip "$control_port"; then
                             sleep 5
                             local new_ip=$(get_tor_exit_ip "$port")
                             if [ -n "$new_ip" ]; then
-                                local ip_country=$(get_ip_country "$new_ip")
+                                ip_country=$(get_ip_country "$new_ip")
                                 if [ "$ip_country" = "$country" ]; then
                                     sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
                                     print_info "✅ Rotated IP for ${country}: ${new_ip} (${ip_country})"
@@ -350,16 +363,13 @@ monitor_daemon() {
                         print_error "Could not get valid ${country} IP after 3 rotation attempts."
                     fi
                 else
-                    # IP is reachable, but check if country matches (extra safety)
+                    # IP reachable: check country consistency
                     current_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$current_ip" ] && [ "$current_ip" != "$saved_ip" ]; then
+                    if [ -n "$current_ip" ]; then
                         ip_country=$(get_ip_country "$current_ip")
-                        if [ "$ip_country" = "$country" ]; then
-                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
-                            print_info "Updated IP for ${country}: ${current_ip} (${ip_country})"
-                        else
-                            print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Will rotate."
-                            # Force rotation if country mismatch
+                        if [ "$ip_country" != "$country" ]; then
+                            print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Attempting to fix..."
+                            # Force rotation
                             rotate_tor_ip "$control_port"
                             sleep 5
                             new_ip=$(get_tor_exit_ip "$port")
@@ -368,6 +378,8 @@ monitor_daemon() {
                                 if [ "$new_country" = "$country" ]; then
                                     sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
                                     print_info "✅ Forced rotation fixed IP for ${country}: ${new_ip} (${new_country})"
+                                else
+                                    print_error "Cannot fix country for ${country}. Current IP: ${new_ip} (${new_country})"
                                 fi
                             fi
                         fi
