@@ -27,24 +27,8 @@ TUI_MODE=0
 # Global error message for TUI
 LAST_ERROR=""
 
-# Read version from VERSION file (local or installed)
-get_version() {
-    local script_dir="$(dirname "$0")"
-    if [ -f "$script_dir/VERSION" ]; then
-        cat "$script_dir/VERSION" | tr -d '\n\r'
-    elif [ -f "VERSION" ]; then
-        cat "VERSION" | tr -d '\n\r'
-    else
-        echo "0.0.0"   # Fallback
-    fi
-}
-
-VERSION=$(get_version)
-
-# Ensure we have a valid working directory (fixes "getcwd" errors)
-if ! cd . 2>/dev/null; then
-    cd /
-fi
+# Ordered list of countries (by port order)
+COUNTRIES_ORDERED=("DE" "TR" "US" "FR" "NL" "GB" "CA" "JP" "IT" "SE" "CH" "ES")
 
 # Predefined countries with fixed ports
 declare -A PREDEFINED_PORTS=(
@@ -61,6 +45,25 @@ declare -A PREDEFINED_PORTS=(
     ["CH"]=9090
     ["ES"]=9091
 )
+
+# Read version from VERSION file (local or installed)
+get_version() {
+    local script_dir="$(dirname "$0")"
+    if [ -f "$script_dir/VERSION" ]; then
+        cat "$script_dir/VERSION" | tr -d '\n\r'
+    elif [ -f "VERSION" ]; then
+        cat "VERSION" | tr -d '\n\r'
+    else
+        echo "0.0.0"
+    fi
+}
+
+VERSION=$(get_version)
+
+# Ensure we have a valid working directory
+if ! cd . 2>/dev/null; then
+    cd /
+fi
 
 # Colors (for CLI mode)
 RED='\033[0;31m'
@@ -96,7 +99,6 @@ print_error() {
     fi
 }
 
-# Error handling for TUI
 set_error() {
     LAST_ERROR="$1"
     log "[ERROR] $1"
@@ -109,7 +111,6 @@ show_error_tui() {
     fi
 }
 
-# Check if running as root (for privileged commands)
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         print_error "This command requires root privileges. Please run with sudo."
@@ -117,7 +118,6 @@ check_root() {
     fi
 }
 
-# Check if dialog is installed
 check_dialog() {
     if ! command -v dialog &> /dev/null; then
         echo "Dialog is not installed. Installing..."
@@ -125,7 +125,6 @@ check_dialog() {
     fi
 }
 
-# Check prerequisites
 check_prerequisites() {
     local missing=()
     for cmd in tor curl nc ss pgrep pkill dialog; do
@@ -141,12 +140,11 @@ check_prerequisites() {
     return 0
 }
 
-# Create directories and initial files
 create_dirs() {
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR"
     
     if [ ! -f "$AVAILABLE_FILE" ]; then
-        for code in "${!PREDEFINED_PORTS[@]}"; do
+        for code in "${COUNTRIES_ORDERED[@]}"; do
             echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
         done
     fi
@@ -158,7 +156,6 @@ create_dirs() {
     fi
 }
 
-# Get monitor interval
 get_monitor_interval() {
     if [ -f "$MONITOR_INTERVAL_FILE" ]; then
         cat "$MONITOR_INTERVAL_FILE"
@@ -167,7 +164,6 @@ get_monitor_interval() {
     fi
 }
 
-# Find free control port
 find_control_port() {
     local base=10050
     local port=$base
@@ -177,7 +173,6 @@ find_control_port() {
     echo "$port"
 }
 
-# Get exit IP of Tor instance
 get_tor_exit_ip() {
     local port=$1
     local ip=$(curl -s --socks5-hostname 127.0.0.1:"$port" --max-time 5 https://api.ipify.org?format=text 2>/dev/null)
@@ -188,18 +183,26 @@ get_tor_exit_ip() {
     fi
 }
 
-# Check IP quality - returns 0 if IP is reachable within timeout
+get_ip_country() {
+    local ip=$1
+    local country=$(curl -s --max-time 3 "http://ip-api.com/line/$ip?fields=countryCode" 2>/dev/null)
+    if [ -n "$country" ] && [[ "$country" =~ ^[A-Z]{2}$ ]]; then
+        echo "$country"
+    else
+        echo ""
+    fi
+}
+
 check_ip_quality() {
     local port=$1
     local ip=$(get_tor_exit_ip "$port")
     if [ -n "$ip" ]; then
-        return 0   # IP is reachable
+        return 0
     else
-        return 1   # IP not reachable
+        return 1
     fi
 }
 
-# Rotate Tor IP
 rotate_tor_ip() {
     local control_port=$1
     echo -e "AUTHENTICATE \"\"\r\nSIGNAL NEWNYM\r\nQUIT" | nc 127.0.0.1 "$control_port" > /dev/null 2>&1
@@ -208,7 +211,6 @@ rotate_tor_ip() {
 
 # ==================== CORE FUNCTIONS ====================
 
-# Activate a country (given code and port)
 activate_country() {
     local country=$1
     local port=$2
@@ -219,7 +221,6 @@ activate_country() {
     local data_dir="${DATA_DIR}/${country}"
     mkdir -p "$data_dir"
     
-    # Longer circuit lifetime for stable IP
     cat > "${data_dir}/torrc" << EOF
 SocksPort 127.0.0.1:${port}
 ControlPort 127.0.0.1:${control_port}
@@ -235,28 +236,33 @@ EOF
     sleep 3
 
     if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-        set_error "Failed to start Tor for ${country}. Check logs: ${LOG_DIR}/tor_${country}.log"
+        set_error "Failed to start Tor for ${country}."
         echo "${country}:${port}" >> "$AVAILABLE_FILE"
         return 1
     fi
 
-    # Try to get an IP, but don't retry too aggressively
     local exit_ip=""
-    local retry=0
-    while [ $retry -lt $MAX_RETRY ]; do
+    local attempt=0
+    while [ $attempt -lt 5 ]; do
         exit_ip=$(get_tor_exit_ip "$port")
         if [ -n "$exit_ip" ]; then
-            break
+            local ip_country=$(get_ip_country "$exit_ip")
+            if [ "$ip_country" = "$country" ]; then
+                break
+            else
+                print_warn "IP $exit_ip is in $ip_country, not $country. Rotating..."
+                rotate_tor_ip "$control_port"
+                sleep 3
+            fi
         else
             sleep 2
-            retry=$((retry+1))
         fi
+        attempt=$((attempt+1))
     done
 
     if [ -z "$exit_ip" ]; then
-        # Even if no IP, we keep the instance running (monitor will handle)
         exit_ip="unknown"
-        print_warn "Could not get exit IP for ${country} at activation, monitor will retry."
+        print_warn "Could not get valid IP for ${country} at activation."
     fi
 
     echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
@@ -264,7 +270,6 @@ EOF
     return 0
 }
 
-# Deactivate a country
 deactivate_country() {
     local country=$1
     if ! grep -q "^${country}:" "$ACTIVE_FILE"; then
@@ -286,13 +291,11 @@ deactivate_country() {
     return 0
 }
 
-# Stop all active instances
 stop_all_instances() {
     pkill -f "tor -f ${DATA_DIR}/" || true
     print_info "All Tor instances stopped."
 }
 
-# Background monitor (daemon) - only rotate if IP is completely unreachable
 monitor_daemon() {
     local interval=$(get_monitor_interval)
     while true; do
@@ -301,34 +304,73 @@ monitor_daemon() {
                 IFS=':' read -r country port control_port saved_ip <<< "$line"
                 data_dir="${DATA_DIR}/${country}"
                 
-                # Check if Tor process is running
+                # First: check if Tor process is running
                 if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
                     print_warn "${country} is down. Restarting..."
                     tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
                     sleep 2
-                    # Try to get new IP after restart
                     local new_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$new_ip" ] && [ "$new_ip" != "$saved_ip" ]; then
-                        sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                        print_info "Updated IP for ${country} after restart: ${new_ip}"
+                    if [ -n "$new_ip" ]; then
+                        local ip_country=$(get_ip_country "$new_ip")
+                        if [ "$ip_country" = "$country" ]; then
+                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
+                            print_info "Updated IP for ${country} after restart: ${new_ip} (${ip_country})"
+                        else
+                            print_warn "New IP after restart is in ${ip_country}, not ${country}. Will try rotation later."
+                        fi
                     fi
                     continue
                 fi
                 
-                # Check IP reachability - only rotate if completely unreachable
+                # Check IP reachability
                 if ! check_ip_quality "$port"; then
-                    print_warn "IP for ${country} is unreachable. Attempting to rotate..."
-                    if rotate_tor_ip "$control_port"; then
-                        sleep 5
-                        local new_ip=$(get_tor_exit_ip "$port")
-                        if [ -n "$new_ip" ]; then
-                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "Rotated IP for ${country}: ${new_ip}"
-                        else
-                            print_warn "Could not get new IP for ${country} after rotation."
+                    print_warn "IP for ${country} is completely unreachable. Attempting to rotate..."
+                    local rotated=0
+                    for attempt in {1..3}; do
+                        if rotate_tor_ip "$control_port"; then
+                            sleep 5
+                            local new_ip=$(get_tor_exit_ip "$port")
+                            if [ -n "$new_ip" ]; then
+                                local ip_country=$(get_ip_country "$new_ip")
+                                if [ "$ip_country" = "$country" ]; then
+                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
+                                    print_info "✅ Rotated IP for ${country}: ${new_ip} (${ip_country})"
+                                    rotated=1
+                                    break
+                                else
+                                    print_warn "Rotated IP ${new_ip} is in ${ip_country}, not ${country}. Trying again..."
+                                fi
+                            else
+                                print_warn "No IP after rotation, trying again..."
+                            fi
                         fi
-                    else
-                        print_error "Rotation failed for ${country}."
+                        sleep 3
+                    done
+                    if [ $rotated -eq 0 ]; then
+                        print_error "Could not get valid ${country} IP after 3 rotation attempts."
+                    fi
+                else
+                    # IP is reachable, but check if country matches (extra safety)
+                    current_ip=$(get_tor_exit_ip "$port")
+                    if [ -n "$current_ip" ] && [ "$current_ip" != "$saved_ip" ]; then
+                        ip_country=$(get_ip_country "$current_ip")
+                        if [ "$ip_country" = "$country" ]; then
+                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
+                            print_info "Updated IP for ${country}: ${current_ip} (${ip_country})"
+                        else
+                            print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Will rotate."
+                            # Force rotation if country mismatch
+                            rotate_tor_ip "$control_port"
+                            sleep 5
+                            new_ip=$(get_tor_exit_ip "$port")
+                            if [ -n "$new_ip" ]; then
+                                new_country=$(get_ip_country "$new_ip")
+                                if [ "$new_country" = "$country" ]; then
+                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
+                                    print_info "✅ Forced rotation fixed IP for ${country}: ${new_ip} (${new_country})"
+                                fi
+                            fi
+                        fi
                     fi
                 fi
             done < "$ACTIVE_FILE"
@@ -339,7 +381,6 @@ monitor_daemon() {
 
 # ==================== TUI FUNCTIONS ====================
 
-# Show main menu
 main_menu() {
     while true; do
         choice=$(dialog --clear --title "OrbitalX v${VERSION}" \
@@ -372,7 +413,6 @@ main_menu() {
     done
 }
 
-# Show available countries
 show_available_tui() {
     if [ ! -s "$AVAILABLE_FILE" ]; then
         dialog --msgbox "No countries available. All are active." 6 40
@@ -391,7 +431,6 @@ show_available_tui() {
         2>&1 >/dev/tty
 }
 
-# Activate a country (select from available)
 activate_tui() {
     if [ ! -s "$AVAILABLE_FILE" ]; then
         dialog --msgbox "No countries available to activate." 6 40
@@ -433,7 +472,6 @@ activate_tui() {
     fi
 }
 
-# Show active status
 show_status_tui() {
     if [ ! -s "$ACTIVE_FILE" ]; then
         dialog --msgbox "No active locations." 6 40
@@ -443,31 +481,31 @@ show_status_tui() {
     local tmp_file="/tmp/orbitalx_status.txt"
     > "$tmp_file"
     
-    echo "Country | Port | Status | Exit IP" >> "$tmp_file"
-    echo "--------|------|--------|---------" >> "$tmp_file"
+    echo "Country | Port | Status | Exit IP | Country" >> "$tmp_file"
+    echo "--------|------|--------|---------|---------" >> "$tmp_file"
     
     while IFS= read -r line; do
         IFS=':' read -r country port control_port saved_ip <<< "$line"
         if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
             current_ip=$(get_tor_exit_ip "$port")
             if [ -z "$current_ip" ]; then
-                echo "${country} | ${port} | ⚠️ Issue | ${saved_ip:-Unknown}" >> "$tmp_file"
+                echo "${country} | ${port} | ⚠️ Issue | ${saved_ip:-Unknown} | -" >> "$tmp_file"
             else
-                echo "${country} | ${port} | ✅ Active | ${current_ip}" >> "$tmp_file"
+                ip_country=$(get_ip_country "$current_ip")
+                echo "${country} | ${port} | ✅ Active | ${current_ip} | ${ip_country:-Unknown}" >> "$tmp_file"
                 if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
                     sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
                 fi
             fi
         else
-            echo "${country} | ${port} | ❌ Stopped | ${saved_ip:-Unknown}" >> "$tmp_file"
+            echo "${country} | ${port} | ❌ Stopped | ${saved_ip:-Unknown} | -" >> "$tmp_file"
         fi
     done < "$ACTIVE_FILE"
     
-    dialog --title "Active Locations" --textbox "$tmp_file" 20 60
+    dialog --title "Active Locations" --textbox "$tmp_file" 20 65
     rm -f "$tmp_file"
 }
 
-# Deactivate a country
 deactivate_tui() {
     if [ ! -s "$ACTIVE_FILE" ]; then
         dialog --msgbox "No active countries to deactivate." 6 40
@@ -504,7 +542,6 @@ deactivate_tui() {
     fi
 }
 
-# Set monitor interval
 set_interval_tui() {
     local current=$(get_monitor_interval)
     local new=$(dialog --title "Set Monitor Interval" \
@@ -520,7 +557,6 @@ set_interval_tui() {
     fi
 }
 
-# Stop all instances (TUI)
 stop_all_tui() {
     dialog --yesno "Are you sure you want to stop all active Tor instances?" 6 50
     if [ $? -eq 0 ]; then
@@ -535,7 +571,6 @@ stop_all_tui() {
     fi
 }
 
-# Admin menu (install/update/uninstall)
 admin_menu() {
     while true; do
         choice=$(dialog --clear --title "Administration" \
@@ -560,27 +595,26 @@ admin_menu() {
     done
 }
 
-# Install (TUI)
 install_tui() {
     dialog --infobox "Installing OrbitalX..." 5 40
     if install_core; then
         dialog --msgbox "✅ Installation complete.\nService enabled: orbitalx.service" 6 50
+        exec /usr/local/bin/orbitalx
     else
         show_error_tui
     fi
 }
 
-# Update (TUI)
 update_tui() {
     dialog --infobox "Updating OrbitalX from GitHub..." 5 40
     if update_core; then
         dialog --msgbox "✅ Update completed successfully.\nService restarted." 6 40
+        exec /usr/local/bin/orbitalx
     else
         show_error_tui
     fi
 }
 
-# Uninstall (TUI)
 uninstall_tui() {
     dialog --yesno "Are you sure you want to uninstall OrbitalX?" 6 50
     if [ $? -eq 0 ]; then
@@ -642,6 +676,7 @@ EOF
     systemctl enable orbitalx.service
     systemctl start orbitalx.service
 
+    VERSION=$(get_version)
     print_info "Installation complete. Service enabled and started."
     return 0
 }
@@ -649,14 +684,12 @@ EOF
 update_core() {
     check_root
 
-    # If we are inside a git repository, do git pull
     if [ -d "$(dirname "$(realpath "$0")")/.git" ]; then
         local repo_dir="$(dirname "$(realpath "$0")")"
         cd "$repo_dir"
         print_info "Git repository detected. Pulling latest changes..."
         if git pull; then
             print_info "Git pull successful."
-            # Copy updated files to system location if installed
             if [ -f "/usr/local/bin/orbitalx" ]; then
                 cp "$repo_dir/orbitalx.sh" /usr/local/bin/orbitalx 2>/dev/null || cp "$repo_dir/orbitalx" /usr/local/bin/orbitalx 2>/dev/null
                 chmod +x /usr/local/bin/orbitalx
@@ -665,6 +698,7 @@ update_core() {
                 cp "$repo_dir/VERSION" /usr/local/bin/VERSION
             fi
             systemctl restart orbitalx 2>/dev/null || true
+            VERSION=$(get_version)
             return 0
         else
             set_error "Git pull failed. See logs for details."
@@ -672,7 +706,6 @@ update_core() {
         fi
     fi
 
-    # Not in git repo: update installed version from GitHub
     if [ -f "/usr/local/bin/orbitalx" ]; then
         print_info "Updating installed OrbitalX from GitHub..."
         local tmp_script="/tmp/orbitalx_update.sh"
@@ -697,6 +730,7 @@ update_core() {
         fi
 
         systemctl restart orbitalx 2>/dev/null || true
+        VERSION=$(get_version)
         print_info "Update completed successfully."
         return 0
     else
