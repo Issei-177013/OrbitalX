@@ -595,14 +595,12 @@ install_core() {
     local tmp_script="/tmp/orbitalx_install.sh"
     local tmp_version="/tmp/orbitalx_version"
 
-    # Download script
     curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
     if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
         print_error "Failed to download script."
         return 1
     fi
 
-    # Download VERSION file
     curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version"
     if [ $? -eq 0 ] && [ -s "$tmp_version" ]; then
         cp "$tmp_version" /usr/local/bin/VERSION
@@ -614,7 +612,6 @@ install_core() {
     chmod +x "$tmp_script"
     mv "$tmp_script" /usr/local/bin/orbitalx
 
-    # Create systemd service
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
 Description=OrbitalX - Tor Multi-Location Manager
@@ -642,59 +639,61 @@ EOF
 
 update_core() {
     check_root
-    local script_path=$(realpath "$0")
-    local script_dir=$(dirname "$script_path")
-    
-    if [ -d "${script_dir}/.git" ]; then
+
+    # If we are inside a git repository, do git pull
+    if [ -d "$(dirname "$(realpath "$0")")/.git" ]; then
+        local repo_dir="$(dirname "$(realpath "$0")")"
+        cd "$repo_dir"
         print_info "Git repository detected. Pulling latest changes..."
-        cd "$script_dir"
-        git pull
-        if [ $? -eq 0 ]; then
+        if git pull; then
             print_info "Git pull successful."
-            # Update installed files if present
+            # Copy updated files to system location if installed
             if [ -f "/usr/local/bin/orbitalx" ]; then
-                cp "$script_path" /usr/local/bin/orbitalx
+                cp "$repo_dir/orbitalx.sh" /usr/local/bin/orbitalx 2>/dev/null || cp "$repo_dir/orbitalx" /usr/local/bin/orbitalx 2>/dev/null
                 chmod +x /usr/local/bin/orbitalx
-                print_info "Updated /usr/local/bin/orbitalx"
             fi
-            if [ -f "/usr/local/bin/VERSION" ] && [ -f "$script_dir/VERSION" ]; then
-                cp "$script_dir/VERSION" /usr/local/bin/VERSION
-                print_info "Updated /usr/local/bin/VERSION"
+            if [ -f "$repo_dir/VERSION" ] && [ -f "/usr/local/bin/VERSION" ]; then
+                cp "$repo_dir/VERSION" /usr/local/bin/VERSION
             fi
             systemctl restart orbitalx 2>/dev/null || true
+            return 0
         else
             print_error "Git pull failed."
             return 1
         fi
-    elif [ "$script_path" == "/usr/local/bin/orbitalx" ]; then
-        print_info "Downloading latest version from GitHub..."
-        local tmp_script="/tmp/orbitalx_new.sh"
-        local tmp_version="/tmp/orbitalx_new_version"
-        
-        curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
-        if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
+    fi
+
+    # Not in git repo: update installed version from GitHub
+    if [ -f "/usr/local/bin/orbitalx" ]; then
+        print_info "Updating installed OrbitalX from GitHub..."
+        local tmp_script="/tmp/orbitalx_update.sh"
+        local tmp_version="/tmp/orbitalx_update_version"
+
+        if curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script" && [ -s "$tmp_script" ]; then
+            chmod +x "$tmp_script"
+            mv "$tmp_script" /usr/local/bin/orbitalx
+            print_info "Script updated."
+        else
             print_error "Failed to download script."
             rm -f "$tmp_script"
             return 1
         fi
-        
-        curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version"
-        if [ $? -eq 0 ] && [ -s "$tmp_version" ]; then
-            cp "$tmp_version" /usr/local/bin/VERSION
+
+        if curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version" && [ -s "$tmp_version" ]; then
+            mv "$tmp_version" /usr/local/bin/VERSION
+            print_info "VERSION file updated."
         else
             print_warn "Could not download VERSION, keeping existing."
+            rm -f "$tmp_version"
         fi
-        
-        chmod +x "$tmp_script"
-        mv "$tmp_script" /usr/local/bin/orbitalx
-        print_info "Update successful. Restarting service..."
+
         systemctl restart orbitalx 2>/dev/null || true
+        print_info "Update completed successfully."
+        return 0
     else
-        print_error "OrbitalX is not installed in a standard location or not in a git repo."
-        print_info "Please install first with 'orbitalx install' or re-run the one-liner."
+        print_error "OrbitalX is not installed. Please run 'orbitalx install' first."
         return 1
     fi
-    return 0
 }
 
 uninstall_core() {
