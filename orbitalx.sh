@@ -24,6 +24,9 @@ DEFAULT_MONITOR_INTERVAL=600
 MAX_RETRY=3
 TUI_MODE=0
 
+# Global error message for TUI
+LAST_ERROR=""
+
 # Read version from VERSION file (local or installed)
 get_version() {
     local script_dir="$(dirname "$0")"
@@ -90,6 +93,19 @@ print_error() {
     log "[ERROR] $1"
     if [ $TUI_MODE -eq 0 ]; then
         echo -e "${RED}[ERROR]${NC} $1"
+    fi
+}
+
+# Error handling for TUI
+set_error() {
+    LAST_ERROR="$1"
+    log "[ERROR] $1"
+}
+
+show_error_tui() {
+    if [ -n "$LAST_ERROR" ]; then
+        dialog --title "Error" --msgbox "$LAST_ERROR" 8 60
+        LAST_ERROR=""
     fi
 }
 
@@ -223,7 +239,7 @@ EOF
     sleep 3
 
     if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-        print_error "Failed to start Tor for ${country}."
+        set_error "Failed to start Tor for ${country}. Check logs: ${LOG_DIR}/tor_${country}.log"
         echo "${country}:${port}" >> "$AVAILABLE_FILE"
         return 1
     fi
@@ -244,7 +260,7 @@ EOF
     if [ -z "$exit_ip" ]; then
         exit_ip=$(get_tor_exit_ip "$port")
         if [ -z "$exit_ip" ]; then
-            print_error "Cannot get IP. Removing instance."
+            set_error "Cannot get exit IP for ${country}. Instance removed."
             pkill -f "tor -f ${data_dir}/torrc" || true
             rm -rf "$data_dir"
             echo "${country}:${port}" >> "$AVAILABLE_FILE"
@@ -261,7 +277,7 @@ EOF
 deactivate_country() {
     local country=$1
     if ! grep -q "^${country}:" "$ACTIVE_FILE"; then
-        print_error "Country ${country} not active."
+        set_error "Country ${country} is not active."
         return 1
     fi
     
@@ -415,7 +431,7 @@ activate_tui() {
             if [ $exit_code -eq 0 ]; then
                 dialog --msgbox "✅ ${country} activated successfully!\n\nUse port ${port} in Xray outbound." 8 50
             else
-                dialog --msgbox "❌ Failed to activate ${country}.\nCheck logs: ${LOG_DIR}/tor_${country}.log" 8 50
+                show_error_tui
             fi
             rm -f /tmp/orbitalx_activate.log /tmp/orbitalx_activate.exit
         else
@@ -489,7 +505,7 @@ deactivate_tui() {
         if [ $exit_code -eq 0 ]; then
             dialog --msgbox "✅ ${country} deactivated and moved back to available list." 6 50
         else
-            dialog --msgbox "❌ Failed to deactivate ${country}.\nCheck logs." 6 40
+            show_error_tui
         fi
         rm -f /tmp/orbitalx_deactivate.log /tmp/orbitalx_deactivate.exit
     fi
@@ -557,7 +573,7 @@ install_tui() {
     if install_core; then
         dialog --msgbox "✅ Installation complete.\nService enabled: orbitalx.service" 6 50
     else
-        dialog --msgbox "❌ Installation failed. Check logs." 6 40
+        show_error_tui
     fi
 }
 
@@ -567,7 +583,7 @@ update_tui() {
     if update_core; then
         dialog --msgbox "✅ Update completed successfully.\nService restarted." 6 40
     else
-        dialog --msgbox "❌ Update failed. Check logs or try manually." 6 40
+        show_error_tui
     fi
 }
 
@@ -597,7 +613,7 @@ install_core() {
 
     curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
     if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
-        print_error "Failed to download script."
+        set_error "Failed to download script from GitHub."
         return 1
     fi
 
@@ -658,7 +674,7 @@ update_core() {
             systemctl restart orbitalx 2>/dev/null || true
             return 0
         else
-            print_error "Git pull failed."
+            set_error "Git pull failed. See logs for details."
             return 1
         fi
     fi
@@ -674,7 +690,7 @@ update_core() {
             mv "$tmp_script" /usr/local/bin/orbitalx
             print_info "Script updated."
         else
-            print_error "Failed to download script."
+            set_error "Failed to download script from GitHub."
             rm -f "$tmp_script"
             return 1
         fi
@@ -691,7 +707,7 @@ update_core() {
         print_info "Update completed successfully."
         return 0
     else
-        print_error "OrbitalX is not installed. Please run 'orbitalx install' first."
+        set_error "OrbitalX is not installed. Please run 'orbitalx install' first."
         return 1
     fi
 }
