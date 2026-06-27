@@ -3,6 +3,7 @@
 # ===========================================================
 # OrbitalX - Tor Multi-Location Manager for Xray
 # Version: Read from VERSION file
+# Author: Issei-177013
 # Description: TUI-based management with predefined countries
 #              and fixed ports. Monitor interval configurable.
 # ===========================================================
@@ -442,7 +443,7 @@ monitor_daemon() {
 
 main_menu() {
     while true; do
-        choice=$(dialog --clear --title "OrbitalX v${VERSION}" \
+        choice=$(dialog --clear --title "OrbitalX v${VERSION} - Issei-177013" \
             --menu "Tor Location Manager for Xray" 18 60 10 \
             1 "Show Available Countries" \
             2 "Activate a Country" \
