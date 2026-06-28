@@ -118,7 +118,12 @@ NC='\033[0m'
 # ==================== HELPER FUNCTIONS ====================
 
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_DIR}/manager.log"
+    # Ensure log directory exists (fallback to /tmp if not writable)
+    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+        LOG_DIR="/tmp/orbitalx"
+        mkdir -p "$LOG_DIR" 2>/dev/null || true
+    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_DIR}/manager.log" 2>/dev/null || true
 }
 
 print_info() {
@@ -921,9 +926,10 @@ EOF
 
 if [ $# -eq 0 ]; then
     TUI_MODE=1
+    # Create directories early to avoid log errors
+    create_dirs
     check_dialog
     check_prerequisites || exit 1
-    create_dirs
     main_menu
 else
     TUI_MODE=0
