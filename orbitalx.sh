@@ -166,25 +166,76 @@ check_root() {
     fi
 }
 
-check_dialog() {
-    if ! command -v dialog &> /dev/null; then
-        echo "Dialog is not installed. Installing..."
-        sudo apt update && sudo apt install dialog -y
-    fi
-}
-
-check_prerequisites() {
+# Install missing packages automatically
+install_missing_packages() {
     local missing=()
     for cmd in tor curl nc ss pgrep pkill dialog; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
     done
-    if [ ${#missing[@]} -ne 0 ]; then
-        print_error "Missing: ${missing[*]}"
-        print_info "Install with: sudo apt update && sudo apt install tor curl netcat-openbsd iproute2 procps dialog -y"
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    print_info "Missing packages: ${missing[*]}"
+    print_info "Attempting to install missing packages..."
+
+    # Map command names to package names
+    declare -A PKG_MAP=(
+        ["tor"]="tor"
+        ["curl"]="curl"
+        ["nc"]="netcat-openbsd"
+        ["ss"]="iproute2"
+        ["pgrep"]="procps"
+        ["pkill"]="procps"
+        ["dialog"]="dialog"
+    )
+
+    # Collect unique package names
+    local pkgs=()
+    for cmd in "${missing[@]}"; do
+        pkgs+=("${PKG_MAP[$cmd]}")
+    done
+
+    # Remove duplicates
+    pkgs=($(printf "%s\n" "${pkgs[@]}" | sort -u))
+
+    # Update and install
+    apt update -y
+    apt install -y "${pkgs[@]}"
+
+    # Re-check
+    local still_missing=()
+    for cmd in "${missing[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            still_missing+=("$cmd")
+        fi
+    done
+
+    if [ ${#still_missing[@]} -ne 0 ]; then
+        print_error "Failed to install: ${still_missing[*]}"
+        print_info "Please install manually: sudo apt install ${still_missing[*]}"
         return 1
     fi
+
+    print_info "All missing packages installed successfully."
+    return 0
+}
+
+check_prerequisites() {
+    # Ensure dialog is installed (needed for TUI)
+    if ! command -v dialog &> /dev/null; then
+        print_info "Dialog is not installed. Installing..."
+        apt update -y && apt install -y dialog
+    fi
+
+    # Install other missing tools
+    if ! install_missing_packages; then
+        return 1
+    fi
+
     return 0
 }
 
@@ -939,7 +990,6 @@ if [ $# -eq 0 ]; then
     check_root   # Require root for TUI menu (since all actions need it)
     # Create directories early to avoid log errors
     create_dirs
-    check_dialog
     check_prerequisites || exit 1
     main_menu
 else
