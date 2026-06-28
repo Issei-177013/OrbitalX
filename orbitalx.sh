@@ -569,6 +569,7 @@ activate_tui() {
         local port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
         if [ -n "$port" ]; then
             (
+                set +e
                 activate_country "$country" "$port" > /tmp/orbitalx_activate.log 2>&1
                 echo $? > /tmp/orbitalx_activate.exit
             ) &
@@ -644,6 +645,7 @@ deactivate_tui() {
     
     if [ -n "$country" ]; then
         (
+            set +e
             deactivate_country "$country" > /tmp/orbitalx_deactivate.log 2>&1
             echo $? > /tmp/orbitalx_deactivate.exit
         ) &
@@ -987,8 +989,7 @@ EOF
 
 if [ $# -eq 0 ]; then
     TUI_MODE=1
-    check_root   # Require root for TUI menu (since all actions need it)
-    # Create directories early to avoid log errors
+    check_root
     create_dirs
     check_prerequisites || exit 1
     main_menu
