@@ -161,7 +161,7 @@ show_error_tui() {
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        print_error "This command requires root privileges. Please run with sudo."
+        echo "This command requires root privileges. Please run with sudo."
         exit 1
     fi
 }
@@ -825,6 +825,16 @@ uninstall_core() {
 # ==================== CLI COMMANDS ====================
 
 cli_mode() {
+    # All CLI commands except 'help' require root
+    case "$1" in
+        help)
+            # help can be shown without root
+            ;;
+        *)
+            check_root
+            ;;
+    esac
+
     case "$1" in
         install)
             install_core
@@ -926,6 +936,7 @@ EOF
 
 if [ $# -eq 0 ]; then
     TUI_MODE=1
+    check_root   # Require root for TUI menu (since all actions need it)
     # Create directories early to avoid log errors
     create_dirs
     check_dialog
