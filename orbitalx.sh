@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # ===========================================================
-# OrbitalX - Tor Multi-Location Manager for Xray
+# OrbitalX - Hybrid Tor & Psiphon Multi-Instance Manager
 # Version: Read from VERSION file
 # Author: Issei-177013
-# Description: TUI-based management with predefined countries
-#              and fixed ports. Monitor interval configurable.
+# Description: Full-featured TUI manager for multiple Tor & Psiphon instances
 # ===========================================================
 
 set -e
@@ -18,23 +17,20 @@ CONFIG_DIR="/etc/orbitalx"
 DATA_DIR="/var/lib/orbitalx"
 LOG_DIR="/var/log/orbitalx"
 PID_DIR="/var/run/orbitalx"
-ACTIVE_FILE="${CONFIG_DIR}/active.conf"
-AVAILABLE_FILE="${CONFIG_DIR}/available.conf"
+INSTANCES_FILE="${CONFIG_DIR}/instances.conf"
+PORT_ALLOC_FILE="${CONFIG_DIR}/port_allocator.conf"
 MONITOR_INTERVAL_FILE="${CONFIG_DIR}/monitor_interval.conf"
 DEFAULT_MONITOR_INTERVAL=600
-MAX_RETRY=3
 TUI_MODE=0
+
+# Psiphon specific
+PSIPHON_BIN="/etc/psiphon/psiphon-tunnel-core-x86_64"
+PSIPHON_DEFAULT_CONFIG="/etc/psiphon/psiphon.config"
+PSIPHON_BASE_DIR="/etc/psiphon-instances"
+PSIPHON_VALID_REGIONS=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
 
 # Global error message for TUI
 LAST_ERROR=""
-
-# Full list of countries (35) in order as per image
-COUNTRIES_ORDERED=(
-    "TR" "US" "FR" "AT" "BE" "RO" "CA" "SG" "JP" "IE"
-    "FI" "ES" "PL" "NL" "IT" "CH" "SE" "NO" "DK" "IS"
-    "AU" "IN" "HK" "UA" "CZ" "KR" "ZA" "MX" "MY" "AZ"
-    "CY" "GR" "PT" "HU" "LU"
-)
 
 # Full country names mapping
 declare -A FULL_NAMES=(
@@ -75,21 +71,13 @@ declare -A FULL_NAMES=(
     ["LU"]="Luxembourg"
 )
 
-# Assign ports starting from 9080
-declare -A PREDEFINED_PORTS
-PORT=9080
-for country in "${COUNTRIES_ORDERED[@]}"; do
-    PREDEFINED_PORTS["$country"]=$PORT
-    ((PORT++))
-done
-
 # Helper function to get full country name
 get_full_name() {
     local code=$1
     echo "${FULL_NAMES[$code]:-$code}"
 }
 
-# Read version from VERSION file (local or installed)
+# Read version from VERSION file
 get_version() {
     local script_dir="$(dirname "$0")"
     if [ -f "$script_dir/VERSION" ]; then
@@ -103,12 +91,12 @@ get_version() {
 
 VERSION=$(get_version)
 
-# Ensure we have a valid working directory
+# Ensure valid working directory
 if ! cd . 2>/dev/null; then
     cd /
 fi
 
-# Colors (for CLI mode)
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -118,30 +106,34 @@ NC='\033[0m'
 # ==================== HELPER FUNCTIONS ====================
 
 log() {
-    # Ensure log directory exists (fallback to /tmp if not writable)
+    local level="${2:-INFO}"
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
         LOG_DIR="/tmp/orbitalx"
         mkdir -p "$LOG_DIR" 2>/dev/null || true
     fi
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_DIR}/manager.log" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $1" >> "${LOG_DIR}/manager.log" 2>/dev/null || true
 }
 
+log_info() { log "$1" "INFO"; }
+log_warn() { log "$1" "WARN"; }
+log_error() { log "$1" "ERROR"; }
+
 print_info() {
-    log "[INFO] $1"
+    log_info "$1"
     if [ $TUI_MODE -eq 0 ]; then
         echo -e "${GREEN}[INFO]${NC} $1"
     fi
 }
 
 print_warn() {
-    log "[WARN] $1"
+    log_warn "$1"
     if [ $TUI_MODE -eq 0 ]; then
         echo -e "${YELLOW}[WARN]${NC} $1"
     fi
 }
 
 print_error() {
-    log "[ERROR] $1"
+    log_error "$1"
     if [ $TUI_MODE -eq 0 ]; then
         echo -e "${RED}[ERROR]${NC} $1"
     fi
@@ -149,7 +141,7 @@ print_error() {
 
 set_error() {
     LAST_ERROR="$1"
-    log "[ERROR] $1"
+    log_error "$1"
 }
 
 show_error_tui() {
@@ -166,10 +158,10 @@ check_root() {
     fi
 }
 
-# Install missing packages automatically
+# Install missing packages
 install_missing_packages() {
     local missing=()
-    for cmd in tor curl nc ss pgrep pkill dialog; do
+    for cmd in tor curl nc ss pgrep pkill dialog jq; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -182,7 +174,6 @@ install_missing_packages() {
     print_info "Missing packages: ${missing[*]}"
     print_info "Attempting to install missing packages..."
 
-    # Map command names to package names
     declare -A PKG_MAP=(
         ["tor"]="tor"
         ["curl"]="curl"
@@ -191,22 +182,18 @@ install_missing_packages() {
         ["pgrep"]="procps"
         ["pkill"]="procps"
         ["dialog"]="dialog"
+        ["jq"]="jq"
     )
 
-    # Collect unique package names
     local pkgs=()
     for cmd in "${missing[@]}"; do
         pkgs+=("${PKG_MAP[$cmd]}")
     done
-
-    # Remove duplicates
     pkgs=($(printf "%s\n" "${pkgs[@]}" | sort -u))
 
-    # Update and install
     apt update -y
     apt install -y "${pkgs[@]}"
 
-    # Re-check
     local still_missing=()
     for cmd in "${missing[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -225,15 +212,23 @@ install_missing_packages() {
 }
 
 check_prerequisites() {
-    # Ensure dialog is installed (needed for TUI)
     if ! command -v dialog &> /dev/null; then
         print_info "Dialog is not installed. Installing..."
         apt update -y && apt install -y dialog
     fi
 
-    # Install other missing tools
     if ! install_missing_packages; then
         return 1
+    fi
+
+    # Check Psiphon prerequisites
+    if [ ! -f "$PSIPHON_BIN" ]; then
+        print_warn "Psiphon binary not found at $PSIPHON_BIN"
+        print_info "Psiphon support will be disabled. Install it to use Psiphon."
+    fi
+    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
+        print_warn "Psiphon default config not found at $PSIPHON_DEFAULT_CONFIG"
+        print_info "Psiphon support will be disabled. Create it to use Psiphon."
     fi
 
     return 0
@@ -242,30 +237,40 @@ check_prerequisites() {
 create_dirs() {
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR"
     
-    if [ -f "$AVAILABLE_FILE" ]; then
-        declare -A existing
-        while IFS= read -r line; do
-            if [ -n "$line" ]; then
-                code=$(echo "$line" | cut -d':' -f1)
-                existing["$code"]=1
-            fi
-        done < "$AVAILABLE_FILE"
-        for code in "${COUNTRIES_ORDERED[@]}"; do
-            if [ -z "${existing[$code]}" ]; then
-                echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
-            fi
-        done
-    else
-        for code in "${COUNTRIES_ORDERED[@]}"; do
-            echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
-        done
+    if [ ! -f "$INSTANCES_FILE" ]; then
+        touch "$INSTANCES_FILE"
     fi
     
-    touch "$ACTIVE_FILE"
+    if [ ! -f "$PORT_ALLOC_FILE" ]; then
+        echo "TOR_LAST=9079" > "$PORT_ALLOC_FILE"
+        echo "PSIPHON_SOCKS_LAST=1079" >> "$PORT_ALLOC_FILE"
+        echo "PSIPHON_HTTP_LAST=8079" >> "$PORT_ALLOC_FILE"
+    fi
     
     if [ ! -f "$MONITOR_INTERVAL_FILE" ]; then
         echo "$DEFAULT_MONITOR_INTERVAL" > "$MONITOR_INTERVAL_FILE"
     fi
+}
+
+get_next_port_tor() {
+    source "$PORT_ALLOC_FILE"
+    local next=$((TOR_LAST + 1))
+    sed -i "s/TOR_LAST=.*/TOR_LAST=$next/" "$PORT_ALLOC_FILE"
+    echo "$next"
+}
+
+get_next_port_psiphon_socks() {
+    source "$PORT_ALLOC_FILE"
+    local next=$((PSIPHON_SOCKS_LAST + 1))
+    sed -i "s/PSIPHON_SOCKS_LAST=.*/PSIPHON_SOCKS_LAST=$next/" "$PORT_ALLOC_FILE"
+    echo "$next"
+}
+
+get_next_port_psiphon_http() {
+    source "$PORT_ALLOC_FILE"
+    local next=$((PSIPHON_HTTP_LAST + 1))
+    sed -i "s/PSIPHON_HTTP_LAST=.*/PSIPHON_HTTP_LAST=$next/" "$PORT_ALLOC_FILE"
+    echo "$next"
 }
 
 get_monitor_interval() {
@@ -276,14 +281,17 @@ get_monitor_interval() {
     fi
 }
 
-find_control_port() {
-    local base=10050
-    local port=$base
-    while ss -tuln | grep -q ":$port "; do
-        ((port++))
+generate_instance_id() {
+    local type=$1
+    local country=$2
+    local count=1
+    while grep -q "^${type}-${country}-${count}:" "$INSTANCES_FILE"; do
+        count=$((count + 1))
     done
-    echo "$port"
+    echo "${type}-${country}-${count}"
 }
+
+# ==================== TOR FUNCTIONS ====================
 
 get_tor_exit_ip() {
     local port=$1
@@ -305,194 +313,310 @@ get_ip_country() {
     fi
 }
 
-check_ip_quality() {
-    local port=$1
-    local ip=$(get_tor_exit_ip "$port")
-    if [ -n "$ip" ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
 rotate_tor_ip() {
     local control_port=$1
     echo -e "AUTHENTICATE \"\"\r\nSIGNAL NEWNYM\r\nQUIT" | nc 127.0.0.1 "$control_port" > /dev/null 2>&1
     return $?
 }
 
-# ==================== CORE FUNCTIONS ====================
-
-activate_country() {
+tor_create_instance() {
     local country=$1
-    local port=$2
-    
-    sed -i "/^${country}:/d" "$AVAILABLE_FILE"
-    
-    local control_port=$(find_control_port)
-    local data_dir="${DATA_DIR}/${country}"
+    local port=$(get_next_port_tor)
+    local control_port=$((port + 1000))
+    local instance_id=$(generate_instance_id "TOR" "$country")
+    local data_dir="${DATA_DIR}/${instance_id}"
+    local log_file="${LOG_DIR}/tor_${instance_id}.log"
+    local service_file="/etc/systemd/system/orbitalx-tor-${instance_id}.service"
+    local torrc_file="${data_dir}/torrc"
+
     mkdir -p "$data_dir"
-    
-    cat > "${data_dir}/torrc" << EOF
+
+    cat > "$torrc_file" << EOF
 SocksPort 127.0.0.1:${port}
 ControlPort 127.0.0.1:${control_port}
 DataDirectory ${data_dir}
 ExitNodes {${country}}
 StrictNodes 1
-NumEntryGuards 1
+NumEntryGuards 8
 NewCircuitPeriod 86400
 MaxCircuitDirtiness 86400
 CircuitBuildTimeout 30
+EnforceDistinctSubnets 0
+LearnCircuitBuildTimeout 0
+CircuitIdleTimeout 3600
 EOF
 
-    tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
-    sleep 3
+    # Create systemd service
+    cat > "$service_file" << EOF
+[Unit]
+Description=OrbitalX Tor Instance - ${instance_id}
+After=network.target
 
-    if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-        set_error "Failed to start Tor for ${country}."
-        echo "${country}:${port}" >> "$AVAILABLE_FILE"
+[Service]
+Type=simple
+ExecStart=/usr/bin/tor -f ${torrc_file} --RunAsDaemon 0
+StandardOutput=append:${log_file}
+StandardError=append:${log_file}
+Restart=on-failure
+RestartSec=10
+User=root
+MemoryMax=512M
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "orbitalx-tor-${instance_id}"
+    systemctl start "orbitalx-tor-${instance_id}"
+
+    sleep 5
+    if ! systemctl is-active --quiet "orbitalx-tor-${instance_id}"; then
+        set_error "Tor instance ${instance_id} failed to start"
+        systemctl disable "orbitalx-tor-${instance_id}" 2>/dev/null
+        rm -f "$service_file"
+        rm -rf "$data_dir"
         return 1
     fi
 
+    # Try to get exit IP
     local exit_ip=""
     local ip_country=""
     local success=0
-    
     for attempt in $(seq 1 10); do
         rotate_tor_ip "$control_port"
         sleep 3
-        
         exit_ip=$(get_tor_exit_ip "$port")
         if [ -n "$exit_ip" ]; then
             ip_country=$(get_ip_country "$exit_ip")
             if [ "$ip_country" = "$country" ]; then
                 success=1
                 break
-            else
-                print_warn "Attempt $attempt: IP $exit_ip is in $ip_country, not $country. Retrying..."
             fi
-        else
-            print_warn "Attempt $attempt: No IP yet. Retrying..."
         fi
         sleep 2
     done
 
     if [ $success -eq 0 ]; then
-        set_error "Could not find an exit node in ${country} ($(get_full_name "$country")). Please try again later or choose another country."
-        pkill -f "tor -f ${data_dir}/torrc" || true
+        set_error "Could not get correct exit IP for ${instance_id}"
+        systemctl stop "orbitalx-tor-${instance_id}"
+        systemctl disable "orbitalx-tor-${instance_id}"
+        rm -f "$service_file"
         rm -rf "$data_dir"
-        echo "${country}:${port}" >> "$AVAILABLE_FILE"
         return 1
     fi
 
-    echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
-    print_info "Activated $(get_full_name "$country") on port ${port} with IP ${exit_ip} (${ip_country})."
+    # Save instance
+    echo "${instance_id}:TOR:${country}:${port}:${control_port}:${exit_ip}:active" >> "$INSTANCES_FILE"
+    log_info "Created Tor instance ${instance_id} on port ${port} with IP ${exit_ip}"
+    print_info "✅ Tor ${instance_id} created (${get_full_name "$country"}) on port ${port}"
     return 0
 }
 
-deactivate_country() {
+tor_remove_instance() {
+    local instance_id=$1
+    if ! grep -q "^${instance_id}:" "$INSTANCES_FILE"; then
+        set_error "Instance ${instance_id} not found"
+        return 1
+    fi
+
+    local line=$(grep "^${instance_id}:" "$INSTANCES_FILE")
+    IFS=':' read -r id type country port control_port ip status <<< "$line"
+
+    systemctl stop "orbitalx-tor-${instance_id}" 2>/dev/null
+    systemctl disable "orbitalx-tor-${instance_id}" 2>/dev/null
+    rm -f "/etc/systemd/system/orbitalx-tor-${instance_id}.service"
+    systemctl daemon-reload
+
+    rm -rf "${DATA_DIR}/${instance_id}"
+    sed -i "/^${instance_id}:/d" "$INSTANCES_FILE"
+    log_info "Removed Tor instance ${instance_id}"
+    print_info "✅ Tor ${instance_id} removed"
+    return 0
+}
+
+tor_start_instance() {
+    local instance_id=$1
+    systemctl start "orbitalx-tor-${instance_id}"
+    log_info "Started Tor ${instance_id}"
+    print_info "Tor ${instance_id} started"
+}
+
+tor_stop_instance() {
+    local instance_id=$1
+    systemctl stop "orbitalx-tor-${instance_id}"
+    log_info "Stopped Tor ${instance_id}"
+    print_info "Tor ${instance_id} stopped"
+}
+
+tor_restart_instance() {
+    tor_stop_instance "$1"
+    sleep 2
+    tor_start_instance "$1"
+}
+
+tor_show_log() {
+    local instance_id=$1
+    local log_file="${LOG_DIR}/tor_${instance_id}.log"
+    if [ ! -f "$log_file" ]; then
+        dialog --msgbox "Log file not found: ${log_file}" 6 50
+        return 1
+    fi
+    dialog --title "Tor Log - ${instance_id}" --tailbox "$log_file" 20 80
+}
+
+# ==================== PSIPHON FUNCTIONS ====================
+
+psiphon_create_instance() {
     local country=$1
-    if ! grep -q "^${country}:" "$ACTIVE_FILE"; then
-        set_error "Country $(get_full_name "$country") is not active."
+    local socks_port=$(get_next_port_psiphon_socks)
+    local http_port=$(get_next_port_psiphon_http)
+    local instance_id=$(generate_instance_id "PSIPHON" "$country")
+
+    # Validate region
+    local valid=0
+    for reg in "${PSIPHON_VALID_REGIONS[@]}"; do
+        if [[ "$reg" == "$country" ]]; then
+            valid=1
+            break
+        fi
+    done
+    if [ $valid -eq 0 ]; then
+        set_error "Invalid country code for Psiphon: $country"
         return 1
     fi
-    
-    local line=$(grep "^${country}:" "$ACTIVE_FILE")
-    IFS=':' read -r c port control_port ip <<< "$line"
-    
-    local data_dir="${DATA_DIR}/${country}"
-    pkill -f "tor -f ${data_dir}/torrc" || true
-    rm -rf "$data_dir"
-    
-    sed -i "/^${country}:/d" "$ACTIVE_FILE"
-    echo "${country}:${port}" >> "$AVAILABLE_FILE"
-    
-    print_info "Deactivated $(get_full_name "$country")."
+
+    local instance_dir="${PSIPHON_BASE_DIR}/${instance_id}"
+    mkdir -p "$instance_dir"
+
+    local config_file="${instance_dir}/config.json"
+    cp "$PSIPHON_DEFAULT_CONFIG" "$config_file"
+
+    if command -v jq &>/dev/null; then
+        jq --arg region "$country" --argjson socks "$socks_port" --argjson http "$http_port" \
+           '.EgressRegion = $region | .LocalSocksProxyPort = $socks | .LocalHttpProxyPort = $http' \
+           "$config_file" > tmp.$$ && mv tmp.$$ "$config_file"
+    else
+        sed -i "s/\"EgressRegion\":\"[^\"]*\"/\"EgressRegion\":\"$country\"/" "$config_file"
+        sed -i "s/\"LocalSocksProxyPort\":[0-9]*/\"LocalSocksProxyPort\":$socks_port/" "$config_file"
+        sed -i "s/\"LocalHttpProxyPort\":[0-9]*/\"LocalHttpProxyPort\":$http_port/" "$config_file"
+    fi
+
+    local service_file="/etc/systemd/system/orbitalx-psiphon-${instance_id}.service"
+    local log_file="${LOG_DIR}/psiphon_${instance_id}.log"
+    cat > "$service_file" << EOF
+[Unit]
+Description=OrbitalX Psiphon Instance - ${instance_id}
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${instance_dir}
+ExecStart=${PSIPHON_BIN} -config ${config_file}
+StandardOutput=append:${log_file}
+StandardError=append:${log_file}
+Restart=on-failure
+RestartSec=15
+User=root
+MemoryMax=512M
+KillMode=process
+KillSignal=SIGTERM
+LimitNOFILE=65535
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "orbitalx-psiphon-${instance_id}"
+    systemctl start "orbitalx-psiphon-${instance_id}"
+
+    sleep 3
+    if ! systemctl is-active --quiet "orbitalx-psiphon-${instance_id}"; then
+        set_error "Psiphon instance ${instance_id} failed to start"
+        systemctl disable "orbitalx-psiphon-${instance_id}" 2>/dev/null
+        rm -f "$service_file"
+        rm -rf "$instance_dir"
+        return 1
+    fi
+
+    echo "${instance_id}:PSIPHON:${country}:${socks_port}:${http_port}:active" >> "$INSTANCES_FILE"
+    log_info "Created Psiphon instance ${instance_id} (SOCKS: $socks_port, HTTP: $http_port)"
+    print_info "✅ Psiphon ${instance_id} created (${get_full_name "$country"}) on SOCKS $socks_port"
     return 0
 }
 
-stop_all_instances() {
-    pkill -f "tor -f ${DATA_DIR}/" || true
-    print_info "All Tor instances stopped."
+psiphon_remove_instance() {
+    local instance_id=$1
+    if ! grep -q "^${instance_id}:" "$INSTANCES_FILE"; then
+        set_error "Instance ${instance_id} not found"
+        return 1
+    fi
+
+    systemctl stop "orbitalx-psiphon-${instance_id}" 2>/dev/null
+    systemctl disable "orbitalx-psiphon-${instance_id}" 2>/dev/null
+    rm -f "/etc/systemd/system/orbitalx-psiphon-${instance_id}.service"
+    systemctl daemon-reload
+
+    rm -rf "${PSIPHON_BASE_DIR}/${instance_id}"
+    sed -i "/^${instance_id}:/d" "$INSTANCES_FILE"
+    log_info "Removed Psiphon instance ${instance_id}"
+    print_info "✅ Psiphon ${instance_id} removed"
+    return 0
 }
 
-monitor_daemon() {
-    local interval=$(get_monitor_interval)
-    while true; do
-        if [ -s "$ACTIVE_FILE" ]; then
-            while IFS= read -r line; do
-                IFS=':' read -r country port control_port saved_ip <<< "$line"
-                data_dir="${DATA_DIR}/${country}"
-                full_name=$(get_full_name "$country")
-                
-                if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-                    print_warn "${full_name} is down. Restarting..."
-                    tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
-                    sleep 5
-                    local new_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$new_ip" ]; then
-                        ip_country=$(get_ip_country "$new_ip")
-                        if [ "$ip_country" = "$country" ]; then
-                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "Restored ${full_name} with IP ${new_ip} (${ip_country})"
-                        else
-                            print_error "After restart, IP ${new_ip} is in ${ip_country}, not ${country}. Manual intervention needed."
-                        fi
-                    fi
-                    continue
-                fi
-                
-                if ! check_ip_quality "$port"; then
-                    print_warn "IP for ${full_name} is unreachable. Attempting to rotate..."
-                    local rotated=0
-                    for attempt in {1..3}; do
-                        if rotate_tor_ip "$control_port"; then
-                            sleep 5
-                            local new_ip=$(get_tor_exit_ip "$port")
-                            if [ -n "$new_ip" ]; then
-                                ip_country=$(get_ip_country "$new_ip")
-                                if [ "$ip_country" = "$country" ]; then
-                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Rotated IP for ${full_name}: ${new_ip} (${ip_country})"
-                                    rotated=1
-                                    break
-                                else
-                                    print_warn "Rotated IP ${new_ip} is in ${ip_country}, not ${country}. Trying again..."
-                                fi
-                            else
-                                print_warn "No IP after rotation, trying again..."
-                            fi
-                        fi
-                        sleep 3
-                    done
-                    if [ $rotated -eq 0 ]; then
-                        print_error "Could not get valid ${country} IP after 3 rotation attempts."
-                    fi
-                else
-                    current_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$current_ip" ]; then
-                        ip_country=$(get_ip_country "$current_ip")
-                        if [ "$ip_country" != "$country" ]; then
-                            print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Attempting to fix..."
-                            rotate_tor_ip "$control_port"
-                            sleep 5
-                            new_ip=$(get_tor_exit_ip "$port")
-                            if [ -n "$new_ip" ]; then
-                                new_country=$(get_ip_country "$new_ip")
-                                if [ "$new_country" = "$country" ]; then
-                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Forced rotation fixed IP for ${full_name}: ${new_ip} (${new_country})"
-                                else
-                                    print_error "Cannot fix country for ${full_name}. Current IP: ${new_ip} (${new_country})"
-                                fi
-                            fi
-                        fi
-                    fi
-                fi
-            done < "$ACTIVE_FILE"
+psiphon_start_instance() {
+    local instance_id=$1
+    systemctl start "orbitalx-psiphon-${instance_id}"
+    log_info "Started Psiphon ${instance_id}"
+    print_info "Psiphon ${instance_id} started"
+}
+
+psiphon_stop_instance() {
+    local instance_id=$1
+    systemctl stop "orbitalx-psiphon-${instance_id}"
+    log_info "Stopped Psiphon ${instance_id}"
+    print_info "Psiphon ${instance_id} stopped"
+}
+
+psiphon_restart_instance() {
+    psiphon_stop_instance "$1"
+    sleep 2
+    psiphon_start_instance "$1"
+}
+
+psiphon_show_log() {
+    local instance_id=$1
+    local log_file="${LOG_DIR}/psiphon_${instance_id}.log"
+    if [ ! -f "$log_file" ]; then
+        dialog --msgbox "Log file not found: ${log_file}" 6 50
+        return 1
+    fi
+    dialog --title "Psiphon Log - ${instance_id}" --tailbox "$log_file" 20 80
+}
+
+# ==================== GENERAL INSTANCE MANAGEMENT ====================
+
+list_instances() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        echo "No instances configured."
+        return
+    fi
+    echo "Instances:"
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        if [ "$type" = "TOR" ]; then
+            local full_name=$(get_full_name "$country")
+            local active_status=$(systemctl is-active "orbitalx-tor-${id}" 2>/dev/null || echo "inactive")
+            echo "  $id ($full_name) - TOR - Port: $port - Status: $active_status"
+        elif [ "$type" = "PSIPHON" ]; then
+            local full_name=$(get_full_name "$country")
+            local active_status=$(systemctl is-active "orbitalx-psiphon-${id}" 2>/dev/null || echo "inactive")
+            echo "  $id ($full_name) - PSIPHON - SOCKS: $port, HTTP: $port2 - Status: $active_status"
         fi
-        sleep "$interval"
-    done
+    done < "$INSTANCES_FILE"
 }
 
 # ==================== TUI FUNCTIONS ====================
@@ -500,28 +624,34 @@ monitor_daemon() {
 main_menu() {
     while true; do
         choice=$(dialog --clear --title "OrbitalX v${VERSION} - Issei-177013" \
-            --menu "Tor Location Manager for Xray" 18 60 10 \
-            1 "Show Available Countries" \
-            2 "Activate a Country" \
-            3 "Show Active Status" \
-            4 "Deactivate a Country" \
-            5 "Set Monitor Interval" \
-            6 "Stop All Instances" \
-            7 "Install / Update / Uninstall" \
-            8 "Exit" \
+            --menu "Hybrid Tor & Psiphon Manager" 22 70 14 \
+            1 "Create Instance (Tor)" \
+            2 "Create Instance (Psiphon)" \
+            3 "List/Manage Instances" \
+            4 "Show Status" \
+            5 "View Live Logs" \
+            6 "Stop/Start/Restart Instance" \
+            7 "Remove Instance" \
+            8 "Stop All Instances" \
+            9 "Set Monitor Interval" \
+            10 "Administration" \
+            11 "Exit" \
             2>&1 >/dev/tty)
 
         case $? in
             0)
                 case $choice in
-                    1) show_available_tui ;;
-                    2) activate_tui ;;
-                    3) show_status_tui ;;
-                    4) deactivate_tui ;;
-                    5) set_interval_tui ;;
-                    6) stop_all_tui ;;
-                    7) admin_menu ;;
-                    8) clear; exit 0 ;;
+                    1) create_tor_tui ;;
+                    2) create_psiphon_tui ;;
+                    3) manage_instances_tui ;;
+                    4) show_status_tui ;;
+                    5) view_logs_tui ;;
+                    6) control_instance_tui ;;
+                    7) remove_instance_tui ;;
+                    8) stop_all_tui ;;
+                    9) set_interval_tui ;;
+                    10) admin_menu ;;
+                    11) clear; exit 0 ;;
                 esac
                 ;;
             1|255) clear; exit 0 ;;
@@ -529,138 +659,284 @@ main_menu() {
     done
 }
 
-show_available_tui() {
-    if [ ! -s "$AVAILABLE_FILE" ]; then
-        dialog --msgbox "No countries available. All are active." 6 40
-        return
-    fi
-    
-    local items=()
-    while IFS= read -r line; do
-        IFS=':' read -r code port <<< "$line"
-        full_name=$(get_full_name "$code")
-        items+=("$code" "$full_name [${code}] - Port: $port")
-    done < "$AVAILABLE_FILE"
-    
-    dialog --title "Available Countries" \
-        --menu "Select a country to view details (press Enter)" \
-        20 70 15 "${items[@]}" \
-        2>&1 >/dev/tty
-}
+create_tor_tui() {
+    local countries_list=()
+    # Show all countries (allow duplicates, no restriction)
+    for code in "${!FULL_NAMES[@]}"; do
+        countries_list+=("$code" "$(get_full_name "$code")")
+    done
 
-activate_tui() {
-    if [ ! -s "$AVAILABLE_FILE" ]; then
-        dialog --msgbox "No countries available to activate." 6 40
-        return
-    fi
-    
-    local items=()
-    while IFS= read -r line; do
-        IFS=':' read -r code port <<< "$line"
-        full_name=$(get_full_name "$code")
-        items+=("$code" "$full_name [${code}] - Port: $port")
-    done < "$AVAILABLE_FILE"
-    
-    local country=$(dialog --clear --title "Activate Country" \
-        --menu "Select a country to activate" 20 70 15 "${items[@]}" \
+    local country=$(dialog --clear --title "Create Tor Instance" \
+        --menu "Select a country for Tor" 20 70 15 "${countries_list[@]}" \
         2>&1 >/dev/tty)
-    
-    if [ -n "$country" ]; then
-        local port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
-        if [ -n "$port" ]; then
-            (
-                set +e
-                activate_country "$country" "$port" > /tmp/orbitalx_activate.log 2>&1
-                echo $? > /tmp/orbitalx_activate.exit
-            ) &
-            pid=$!
-            
-            dialog --title "Activating $(get_full_name "$country")..." --infobox "Please wait..." 5 40
-            wait $pid
-            exit_code=$(cat /tmp/orbitalx_activate.exit 2>/dev/null || echo 1)
-            
-            if [ $exit_code -eq 0 ]; then
-                dialog --msgbox "✅ $(get_full_name "$country") activated successfully!\n\nUse port ${port} in Xray outbound." 8 50
-            else
-                show_error_tui
-            fi
-            rm -f /tmp/orbitalx_activate.log /tmp/orbitalx_activate.exit
-        else
-            dialog --msgbox "Error: port not found." 6 40
-        fi
-    fi
-}
 
-show_status_tui() {
-    if [ ! -s "$ACTIVE_FILE" ]; then
-        dialog --msgbox "No active locations." 6 40
-        return
-    fi
-    
-    local tmp_file="/tmp/orbitalx_status.txt"
-    > "$tmp_file"
-    
-    printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "Country" "Port" "Status" "Exit IP" "Code" >> "$tmp_file"
-    printf "%s\n" "----------------------|--------|------------|-----------------|----------" >> "$tmp_file"
-    
-    while IFS= read -r line; do
-        IFS=':' read -r country port control_port saved_ip <<< "$line"
-        full_name=$(get_full_name "$country")
-        if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
-            current_ip=$(get_tor_exit_ip "$port")
-            if [ -z "$current_ip" ]; then
-                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
-            else
-                ip_country=$(get_ip_country "$current_ip")
-                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "✅ Active" "$current_ip" "${ip_country:-?}" >> "$tmp_file"
-                if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
-                    sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
-                fi
-            fi
-        else
-            printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
-        fi
-    done < "$ACTIVE_FILE"
-    
-    dialog --title "Active Locations" --textbox "$tmp_file" 25 80
-    rm -f "$tmp_file"
-}
-
-deactivate_tui() {
-    if [ ! -s "$ACTIVE_FILE" ]; then
-        dialog --msgbox "No active countries to deactivate." 6 40
-        return
-    fi
-    
-    local items=()
-    while IFS= read -r line; do
-        IFS=':' read -r code port rest <<< "$line"
-        full_name=$(get_full_name "$code")
-        items+=("$code" "$full_name [${code}] - Port: $port")
-    done < "$ACTIVE_FILE"
-    
-    local country=$(dialog --clear --title "Deactivate Country" \
-        --menu "Select a country to deactivate" 20 70 15 "${items[@]}" \
-        2>&1 >/dev/tty)
-    
     if [ -n "$country" ]; then
         (
             set +e
-            deactivate_country "$country" > /tmp/orbitalx_deactivate.log 2>&1
-            echo $? > /tmp/orbitalx_deactivate.exit
+            tor_create_instance "$country" > /tmp/orbitalx_create.log 2>&1
+            echo $? > /tmp/orbitalx_create.exit
         ) &
         pid=$!
-        
-        dialog --title "Deactivating $(get_full_name "$country")..." --infobox "Please wait..." 5 40
+        dialog --title "Creating Tor instance..." --infobox "Please wait..." 5 40
         wait $pid
-        exit_code=$(cat /tmp/orbitalx_deactivate.exit 2>/dev/null || echo 1)
-        
+        exit_code=$(cat /tmp/orbitalx_create.exit 2>/dev/null || echo 1)
         if [ $exit_code -eq 0 ]; then
-            dialog --msgbox "✅ $(get_full_name "$country") deactivated and moved back to available list." 6 50
+            dialog --msgbox "✅ Tor instance created successfully!" 6 40
         else
             show_error_tui
         fi
-        rm -f /tmp/orbitalx_deactivate.log /tmp/orbitalx_deactivate.exit
+        rm -f /tmp/orbitalx_create.log /tmp/orbitalx_create.exit
+    fi
+}
+
+create_psiphon_tui() {
+    local countries_list=()
+    for code in "${PSIPHON_VALID_REGIONS[@]}"; do
+        countries_list+=("$code" "$(get_full_name "$code")")
+    done
+
+    if [ ${#countries_list[@]} -eq 0 ]; then
+        dialog --msgbox "No Psiphon-supported countries available." 6 40
+        return
+    fi
+
+    local country=$(dialog --clear --title "Create Psiphon Instance" \
+        --menu "Select a country for Psiphon" 20 70 15 "${countries_list[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ -n "$country" ]; then
+        (
+            set +e
+            psiphon_create_instance "$country" > /tmp/orbitalx_create.log 2>&1
+            echo $? > /tmp/orbitalx_create.exit
+        ) &
+        pid=$!
+        dialog --title "Creating Psiphon instance..." --infobox "Please wait..." 5 40
+        wait $pid
+        exit_code=$(cat /tmp/orbitalx_create.exit 2>/dev/null || echo 1)
+        if [ $exit_code -eq 0 ]; then
+            dialog --msgbox "✅ Psiphon instance created successfully!" 6 40
+        else
+            show_error_tui
+        fi
+        rm -f /tmp/orbitalx_create.log /tmp/orbitalx_create.exit
+    fi
+}
+
+manage_instances_tui() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        dialog --msgbox "No instances configured." 6 40
+        return
+    fi
+
+    local items=()
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        full_name=$(get_full_name "$country")
+        if [ "$type" = "TOR" ]; then
+            items+=("$id" "$full_name [TOR] Port: $port")
+        else
+            items+=("$id" "$full_name [PSIPHON] SOCKS: $port HTTP: $port2")
+        fi
+    done < "$INSTANCES_FILE"
+
+    local instance=$(dialog --clear --title "Instances" \
+        --menu "Select an instance to manage" 20 80 15 "${items[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ -n "$instance" ]; then
+        instance_menu_tui "$instance"
+    fi
+}
+
+instance_menu_tui() {
+    local instance_id=$1
+    local line=$(grep "^${instance_id}:" "$INSTANCES_FILE")
+    IFS=':' read -r id type country port port2 status <<< "$line"
+
+    local type_label=""
+    if [ "$type" = "TOR" ]; then
+        type_label="Tor"
+    else
+        type_label="Psiphon"
+    fi
+
+    while true; do
+        choice=$(dialog --clear --title "Manage ${instance_id} (${type_label})" \
+            --menu "Select action" 15 60 5 \
+            1 "Start" \
+            2 "Stop" \
+            3 "Restart" \
+            4 "View Log" \
+            5 "Back" \
+            2>&1 >/dev/tty)
+
+        case $? in
+            0)
+                case $choice in
+                    1)
+                        if [ "$type" = "TOR" ]; then
+                            tor_start_instance "$instance_id"
+                        else
+                            psiphon_start_instance "$instance_id"
+                        fi
+                        dialog --msgbox "Instance started." 6 30
+                        ;;
+                    2)
+                        if [ "$type" = "TOR" ]; then
+                            tor_stop_instance "$instance_id"
+                        else
+                            psiphon_stop_instance "$instance_id"
+                        fi
+                        dialog --msgbox "Instance stopped." 6 30
+                        ;;
+                    3)
+                        if [ "$type" = "TOR" ]; then
+                            tor_restart_instance "$instance_id"
+                        else
+                            psiphon_restart_instance "$instance_id"
+                        fi
+                        dialog --msgbox "Instance restarted." 6 30
+                        ;;
+                    4)
+                        if [ "$type" = "TOR" ]; then
+                            tor_show_log "$instance_id"
+                        else
+                            psiphon_show_log "$instance_id"
+                        fi
+                        ;;
+                    5) break ;;
+                esac
+                ;;
+            1|255) break ;;
+        esac
+    done
+}
+
+show_status_tui() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        dialog --msgbox "No instances." 6 30
+        return
+    fi
+
+    local tmp_file="/tmp/orbitalx_status.txt"
+    > "$tmp_file"
+    printf "%-25s | %-15s | %-10s | %-20s\n" "Instance" "Country" "Type" "Port(s)" >> "$tmp_file"
+    printf "%s\n" "--------------------------|-----------------|-----------|---------------------" >> "$tmp_file"
+
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        full_name=$(get_full_name "$country")
+        if [ "$type" = "TOR" ]; then
+            active=$(systemctl is-active "orbitalx-tor-${id}" 2>/dev/null || echo "inactive")
+            port_display="SOCKS: $port"
+            type_display="Tor"
+        else
+            active=$(systemctl is-active "orbitalx-psiphon-${id}" 2>/dev/null || echo "inactive")
+            port_display="SOCKS: $port | HTTP: $port2"
+            type_display="Psiphon"
+        fi
+        printf "%-25s | %-15s | %-10s | %-20s [%s]\n" "$id" "$full_name" "$type_display" "$port_display" "$active" >> "$tmp_file"
+    done < "$INSTANCES_FILE"
+
+    dialog --title "OrbitalX Status" --textbox "$tmp_file" 20 80
+    rm -f "$tmp_file"
+}
+
+view_logs_tui() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        dialog --msgbox "No instances." 6 30
+        return
+    fi
+
+    local items=()
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        full_name=$(get_full_name "$country")
+        items+=("$id" "$full_name [${type}]")
+    done < "$INSTANCES_FILE"
+
+    local instance=$(dialog --clear --title "View Logs" \
+        --menu "Select an instance" 20 70 15 "${items[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ -n "$instance" ]; then
+        local line=$(grep "^${instance}:" "$INSTANCES_FILE")
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        if [ "$type" = "TOR" ]; then
+            tor_show_log "$instance"
+        else
+            psiphon_show_log "$instance"
+        fi
+    fi
+}
+
+control_instance_tui() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        dialog --msgbox "No instances." 6 30
+        return
+    fi
+
+    local items=()
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        full_name=$(get_full_name "$country")
+        items+=("$id" "$full_name [${type}]")
+    done < "$INSTANCES_FILE"
+
+    local instance=$(dialog --clear --title "Control Instance" \
+        --menu "Select an instance" 20 70 15 "${items[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ -n "$instance" ]; then
+        instance_menu_tui "$instance"
+    fi
+}
+
+remove_instance_tui() {
+    if [ ! -s "$INSTANCES_FILE" ]; then
+        dialog --msgbox "No instances." 6 30
+        return
+    fi
+
+    local items=()
+    while IFS= read -r line; do
+        IFS=':' read -r id type country port port2 status <<< "$line"
+        full_name=$(get_full_name "$country")
+        items+=("$id" "$full_name [${type}]")
+    done < "$INSTANCES_FILE"
+
+    local instance=$(dialog --clear --title "Remove Instance" \
+        --menu "Select an instance to remove" 20 70 15 "${items[@]}" \
+        2>&1 >/dev/tty)
+
+    if [ -n "$instance" ]; then
+        dialog --yesno "Are you sure you want to remove ${instance}?" 6 50
+        if [ $? -eq 0 ]; then
+            local line=$(grep "^${instance}:" "$INSTANCES_FILE")
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                tor_remove_instance "$instance"
+            else
+                psiphon_remove_instance "$instance"
+            fi
+            dialog --msgbox "Instance removed." 6 30
+        fi
+    fi
+}
+
+stop_all_tui() {
+    dialog --yesno "Stop ALL instances (both Tor and Psiphon)?" 6 50
+    if [ $? -eq 0 ]; then
+        while IFS= read -r line; do
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                systemctl stop "orbitalx-tor-${id}" 2>/dev/null
+            else
+                systemctl stop "orbitalx-psiphon-${id}" 2>/dev/null
+            fi
+        done < "$INSTANCES_FILE"
+        dialog --msgbox "All instances stopped." 6 30
     fi
 }
 
@@ -669,27 +945,12 @@ set_interval_tui() {
     local new=$(dialog --title "Set Monitor Interval" \
         --inputbox "Current interval: ${current} seconds (approx $((current/60)) minutes)\nEnter new interval in seconds:" 10 50 "$current" \
         2>&1 >/dev/tty)
-    
+
     if [ -n "$new" ] && [[ "$new" =~ ^[0-9]+$ ]] && [ $new -gt 0 ]; then
         echo "$new" > "$MONITOR_INTERVAL_FILE"
-        systemctl restart orbitalx 2>/dev/null || true
         dialog --msgbox "Monitor interval set to ${new} seconds ($((new/60)) minutes)." 6 50
     else
         dialog --msgbox "Invalid input. Please enter a positive number." 6 40
-    fi
-}
-
-stop_all_tui() {
-    dialog --yesno "Are you sure you want to stop all active Tor instances?" 6 50
-    if [ $? -eq 0 ]; then
-        (
-            stop_all_instances > /tmp/orbitalx_stop.log 2>&1
-        ) &
-        pid=$!
-        dialog --infobox "Stopping all instances..." 5 40
-        wait $pid
-        dialog --msgbox "All instances stopped." 6 30
-        rm -f /tmp/orbitalx_stop.log
     fi
 }
 
@@ -702,7 +963,7 @@ admin_menu() {
             3 "Uninstall" \
             4 "Back" \
             2>&1 >/dev/tty)
-        
+
         case $? in
             0)
                 case $choice in
@@ -777,15 +1038,15 @@ install_core() {
     chmod +x "$tmp_script"
     mv "$tmp_script" /usr/local/bin/orbitalx
 
-    cat > /etc/systemd/system/orbitalx.service << EOF
+    # Create monitoring service (for future use, optional)
+    cat > /etc/systemd/system/orbitalx-monitor.service << EOF
 [Unit]
-Description=OrbitalX - Tor Multi-Location Manager
+Description=OrbitalX Monitor Daemon
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/orbitalx monitor
-ExecStop=/usr/local/bin/orbitalx stop-all
 Restart=on-failure
 RestartSec=10
 User=root
@@ -795,99 +1056,71 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable orbitalx.service
-    systemctl start orbitalx.service
+    systemctl enable orbitalx-monitor.service 2>/dev/null || true
+    systemctl start orbitalx-monitor.service 2>/dev/null || true
 
     VERSION=$(get_version)
-    print_info "Installation complete. Service enabled and started."
+    print_info "Installation complete."
     return 0
 }
 
 update_core() {
     check_root
+    local script_path=$(realpath "$0")
+    local script_dir=$(dirname "$script_path")
 
-    if [ -d "$(dirname "$(realpath "$0")")/.git" ]; then
-        local repo_dir="$(dirname "$(realpath "$0")")"
-        cd "$repo_dir"
-        print_info "Git repository detected. Pulling latest changes..."
-        if git pull; then
-            print_info "Git pull successful."
-            if [ -f "/usr/local/bin/orbitalx" ]; then
-                cp "$repo_dir/orbitalx.sh" /usr/local/bin/orbitalx 2>/dev/null || cp "$repo_dir/orbitalx" /usr/local/bin/orbitalx 2>/dev/null
-                chmod +x /usr/local/bin/orbitalx
-            fi
-            if [ -f "$repo_dir/VERSION" ] && [ -f "/usr/local/bin/VERSION" ]; then
-                cp "$repo_dir/VERSION" /usr/local/bin/VERSION
-            fi
-            systemctl restart orbitalx 2>/dev/null || true
-            VERSION=$(get_version)
-            return 0
-        else
-            set_error "Git pull failed. See logs for details."
-            return 1
-        fi
-    fi
-
-    if [ -f "/usr/local/bin/orbitalx" ]; then
-        print_info "Updating installed OrbitalX from GitHub..."
-        local tmp_script="/tmp/orbitalx_update.sh"
-        local tmp_version="/tmp/orbitalx_update_version"
-
-        if curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script" && [ -s "$tmp_script" ]; then
-            chmod +x "$tmp_script"
-            mv "$tmp_script" /usr/local/bin/orbitalx
-            print_info "Script updated."
-        else
-            set_error "Failed to download script from GitHub."
-            rm -f "$tmp_script"
-            return 1
-        fi
-
-        if curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version" && [ -s "$tmp_version" ]; then
-            mv "$tmp_version" /usr/local/bin/VERSION
-            print_info "VERSION file updated."
-        else
-            print_warn "Could not download VERSION, keeping existing."
-            rm -f "$tmp_version"
-        fi
-
-        systemctl restart orbitalx 2>/dev/null || true
+    if [ -d "${script_dir}/.git" ]; then
+        cd "$script_dir"
+        git pull
+        cp "$script_path" /usr/local/bin/orbitalx
+        chmod +x /usr/local/bin/orbitalx
+        systemctl restart orbitalx-monitor 2>/dev/null || true
         VERSION=$(get_version)
-        print_info "Update completed successfully."
+        print_info "Update successful."
         return 0
     else
-        set_error "OrbitalX is not installed. Please run 'orbitalx install' first."
-        return 1
+        print_info "Updating installed version from GitHub..."
+        local tmp_script="/tmp/orbitalx_update.sh"
+        curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
+        if [ $? -eq 0 ] && [ -s "$tmp_script" ]; then
+            chmod +x "$tmp_script"
+            mv "$tmp_script" /usr/local/bin/orbitalx
+            systemctl restart orbitalx-monitor 2>/dev/null || true
+            VERSION=$(get_version)
+            print_info "Update successful."
+            return 0
+        else
+            set_error "Failed to download script."
+            return 1
+        fi
     fi
 }
 
 uninstall_core() {
     check_root
-    systemctl stop orbitalx 2>/dev/null || true
-    systemctl disable orbitalx 2>/dev/null || true
-    rm -f /etc/systemd/system/orbitalx.service
+    systemctl stop orbitalx-monitor 2>/dev/null || true
+    systemctl disable orbitalx-monitor 2>/dev/null || true
+    rm -f /etc/systemd/system/orbitalx-monitor.service
     rm -f /usr/local/bin/orbitalx
     rm -f /usr/local/bin/VERSION
     systemctl daemon-reload
-    
+
     if [ $1 -eq 0 ]; then
         rm -rf "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR" "$PID_DIR"
+        rm -rf "$PSIPHON_BASE_DIR"
     fi
+}
+
+monitor_daemon() {
+    # Placeholder for future monitoring
+    while true; do
+        sleep 60
+    done
 }
 
 # ==================== CLI COMMANDS ====================
 
 cli_mode() {
-    # All CLI commands except 'help' require root
-    case "$1" in
-        help)
-            # help can be shown without root
-            ;;
-        *)
-            check_root
-            ;;
-    esac
-
     case "$1" in
         install)
             install_core
@@ -898,81 +1131,110 @@ cli_mode() {
         update)
             update_core
             ;;
-        add)
+        list)
+            list_instances
+            ;;
+        create-tor)
             if [ -z "$2" ]; then
-                print_error "Usage: orbitalx add <COUNTRY>"
+                print_error "Usage: orbitalx create-tor <COUNTRY>"
                 exit 1
             fi
-            country=$(echo "$2" | tr '[:lower:]' '[:upper:]')
-            if ! grep -q "^${country}:" "$AVAILABLE_FILE"; then
-                print_error "Country $(get_full_name "$country") not available."
+            tor_create_instance "$2"
+            ;;
+        create-psiphon)
+            if [ -z "$2" ]; then
+                print_error "Usage: orbitalx create-psiphon <COUNTRY>"
                 exit 1
             fi
-            port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
-            activate_country "$country" "$port"
+            psiphon_create_instance "$2"
             ;;
         remove)
             if [ -z "$2" ]; then
-                print_error "Usage: orbitalx remove <COUNTRY>"
+                print_error "Usage: orbitalx remove <INSTANCE_ID>"
                 exit 1
             fi
-            country=$(echo "$2" | tr '[:lower:]' '[:upper:]')
-            deactivate_country "$country"
+            local line=$(grep "^${2}:" "$INSTANCES_FILE")
+            if [ -z "$line" ]; then
+                print_error "Instance not found"
+                exit 1
+            fi
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                tor_remove_instance "$2"
+            else
+                psiphon_remove_instance "$2"
+            fi
+            ;;
+        start)
+            if [ -z "$2" ]; then
+                print_error "Usage: orbitalx start <INSTANCE_ID>"
+                exit 1
+            fi
+            local line=$(grep "^${2}:" "$INSTANCES_FILE")
+            if [ -z "$line" ]; then
+                print_error "Instance not found"
+                exit 1
+            fi
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                tor_start_instance "$2"
+            else
+                psiphon_start_instance "$2"
+            fi
+            ;;
+        stop)
+            if [ -z "$2" ]; then
+                print_error "Usage: orbitalx stop <INSTANCE_ID>"
+                exit 1
+            fi
+            local line=$(grep "^${2}:" "$INSTANCES_FILE")
+            if [ -z "$line" ]; then
+                print_error "Instance not found"
+                exit 1
+            fi
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                tor_stop_instance "$2"
+            else
+                psiphon_stop_instance "$2"
+            fi
+            ;;
+        restart)
+            if [ -z "$2" ]; then
+                print_error "Usage: orbitalx restart <INSTANCE_ID>"
+                exit 1
+            fi
+            local line=$(grep "^${2}:" "$INSTANCES_FILE")
+            if [ -z "$line" ]; then
+                print_error "Instance not found"
+                exit 1
+            fi
+            IFS=':' read -r id type country port port2 status <<< "$line"
+            if [ "$type" = "TOR" ]; then
+                tor_restart_instance "$2"
+            else
+                psiphon_restart_instance "$2"
+            fi
             ;;
         status)
-            if [ -s "$ACTIVE_FILE" ]; then
-                echo "Active Locations:"
-                while IFS= read -r line; do
-                    IFS=':' read -r code port control_port ip <<< "$line"
-                    full_name=$(get_full_name "$code")
-                    echo "$full_name [$code] | Port: $port | IP: $ip"
-                done < "$ACTIVE_FILE"
-            else
-                echo "No active locations."
-            fi
-            ;;
-        available)
-            if [ -s "$AVAILABLE_FILE" ]; then
-                echo "Available Countries:"
-                while IFS= read -r line; do
-                    IFS=':' read -r code port <<< "$line"
-                    full_name=$(get_full_name "$code")
-                    echo "$full_name [$code] - Port: $port"
-                done < "$AVAILABLE_FILE"
-            else
-                echo "No available countries."
-            fi
-            ;;
-        set-interval)
-            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                print_error "Usage: orbitalx set-interval <SECONDS>"
-                exit 1
-            fi
-            echo "$2" > "$MONITOR_INTERVAL_FILE"
-            systemctl restart orbitalx 2>/dev/null || true
-            print_info "Interval set to $2 seconds."
-            ;;
-        monitor)
-            monitor_daemon
-            ;;
-        stop-all)
-            stop_all_instances
+            show_status_tui
             ;;
         help)
             cat << EOF
-OrbitalX v${VERSION} - Tor Location Manager
+OrbitalX v${VERSION} - Hybrid Tor & Psiphon Manager
 
 CLI Commands:
   install                Install systemd service
   uninstall              Remove everything
-  update                 Update from Git
-  add <COUNTRY>          Activate a country (e.g., DE)
-  remove <COUNTRY>       Deactivate a country
-  status                 Show active locations
-  available              Show available countries
-  set-interval <SEC>     Change monitor interval
-  monitor                Run daemon
-  stop-all               Stop all instances
+  update                 Update from GitHub
+  list                   List all instances
+  create-tor <COUNTRY>   Create a Tor instance
+  create-psiphon <COUNTRY> Create a Psiphon instance
+  remove <INSTANCE_ID>   Remove an instance
+  start <INSTANCE_ID>    Start an instance
+  stop <INSTANCE_ID>     Stop an instance
+  restart <INSTANCE_ID>  Restart an instance
+  status                 Show TUI status
   help                   This help
 
 Run without arguments for TUI menu.
