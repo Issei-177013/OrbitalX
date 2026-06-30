@@ -1395,18 +1395,14 @@ if [ $# -eq 0 ]; then
     TUI_MODE=1
     check_root
 
-    # اگر نصب نیست، پیام خطا بده و راهنمایی کن
+    # اگر نصب نیست، فقط یک هشدار نمایش بده و ادامه بده (تا کاربر از TUI نصب کند)
     if ! is_installed; then
-        echo "OrbitalX is not installed on this system."
+        echo "⚠️  OrbitalX is not installed on this system."
+        echo "   You can install it from the TUI menu: Administration → Install"
+        echo "   Or run: sudo orbitalx install"
         echo ""
-        echo "To install OrbitalX, use one of these methods:"
-        echo "  1. From CLI: sudo orbitalx install"
-        echo "  2. From TUI: Run 'sudo orbitalx' after installation, or from the menu:"
-        echo "     Administration → Install (full setup)"
-        echo ""
-        echo "If you are running this script from the web, use:"
-        echo "  bash <(curl -sL ...) install"
-        exit 1
+        # منتظر یک ثانیه تا کاربر پیام را ببیند
+        sleep 1
     fi
 
     create_dirs
