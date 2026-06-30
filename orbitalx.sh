@@ -25,7 +25,6 @@ DEFAULT_MONITOR_INTERVAL=600
 MAX_RETRY=3
 TUI_MODE=0
 
-# Global error message for TUI
 LAST_ERROR=""
 
 # Psiphon settings
@@ -34,13 +33,11 @@ PSIPHON_CONFIG_DIR="${CONFIG_DIR}/psiphon"
 PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
-# Updated download URL to latest release
 PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/releases/latest/download/psiphon-tunnel-core-x86_64"
 
-# Selected mode for activation (tor or psiphon)
 SELECTED_MODE="tor"
 
-# Full list of countries (35) in order as per image
+# Full list of countries (35)
 COUNTRIES_ORDERED=(
     "TR" "US" "FR" "AT" "BE" "RO" "CA" "SG" "JP" "IE"
     "FI" "ES" "PL" "NL" "IT" "CH" "SE" "NO" "DK" "IS"
@@ -48,7 +45,6 @@ COUNTRIES_ORDERED=(
     "CY" "GR" "PT" "HU" "LU"
 )
 
-# Full country names mapping
 declare -A FULL_NAMES=(
     ["TR"]="Turkey"
     ["US"]="United States"
@@ -87,7 +83,6 @@ declare -A FULL_NAMES=(
     ["LU"]="Luxembourg"
 )
 
-# Assign ports starting from 9080 for Tor
 declare -A PREDEFINED_PORTS
 PORT=9080
 for country in "${COUNTRIES_ORDERED[@]}"; do
@@ -95,13 +90,11 @@ for country in "${COUNTRIES_ORDERED[@]}"; do
     ((PORT++))
 done
 
-# Helper function to get full country name
 get_full_name() {
     local code=$1
     echo "${FULL_NAMES[$code]:-$code}"
 }
 
-# Read version from VERSION file (local or installed)
 get_version() {
     local script_dir="$(dirname "$0")"
     if [ -f "$script_dir/VERSION" ]; then
@@ -115,12 +108,10 @@ get_version() {
 
 VERSION=$(get_version)
 
-# Ensure we have a valid working directory
 if ! cd . 2>/dev/null; then
     cd /
 fi
 
-# Colors (for CLI mode)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -180,35 +171,31 @@ check_root() {
 # ==================== PSIPHON FUNCTIONS ====================
 
 install_psiphon() {
-    # If binary exists and is executable and is an ELF file, assume it's valid
-    if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ]; then
-        if file "$PSIPHON_BIN" | grep -q "ELF"; then
-            return 0
-        fi
+    # Check if existing binary is valid
+    if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ] && file "$PSIPHON_BIN" | grep -q "ELF"; then
+        return 0
     fi
 
     print_info "Downloading Psiphon tunnel core..."
     mkdir -p "$(dirname "$PSIPHON_BIN")"
     
     local tmp_file="/tmp/psiphon_download"
-    # Use curl with -L to follow redirects, -o to output
-    if curl -sL -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL"; then
-        # Check if downloaded file is HTML (bad redirect)
-        if file "$tmp_file" | grep -q "HTML"; then
-            print_error "Downloaded file is HTML (likely a redirect or error). URL may be invalid."
+    # Use curl with user-agent to avoid GitHub blocking
+    if curl -L -H "User-Agent: Mozilla/5.0" -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL"; then
+        # Verify it's an ELF binary
+        if file "$tmp_file" | grep -q "ELF"; then
+            chmod +x "$tmp_file"
+            mv "$tmp_file" "$PSIPHON_BIN"
+            print_info "Psiphon installed successfully."
+            return 0
+        else
+            print_error "Downloaded file is not a valid ELF binary (may be HTML)."
             rm -f "$tmp_file"
+            print_info "Please manually download Psiphon from:"
+            echo "  $PSIPHON_DOWNLOAD_URL"
+            echo "and place it in $PSIPHON_BIN, then chmod +x."
             return 1
         fi
-        # Check if it's empty
-        if [ ! -s "$tmp_file" ]; then
-            print_error "Downloaded file is empty."
-            rm -f "$tmp_file"
-            return 1
-        fi
-        chmod +x "$tmp_file"
-        mv "$tmp_file" "$PSIPHON_BIN"
-        print_info "Psiphon installed successfully."
-        return 0
     else
         set_error "Failed to download Psiphon. Please check network connectivity."
         return 1
@@ -259,7 +246,6 @@ start_psiphon_instance() {
     fi
 
     print_info "Starting Psiphon for $(get_full_name "$country") on port $port..."
-    # Redirect stdout and stderr to a log file for debugging
     nohup "$PSIPHON_BIN" -config "$config_file" >> "${LOG_DIR}/psiphon_${country}.log" 2>&1 &
     sleep 4
 
@@ -610,7 +596,6 @@ monitor_daemon() {
                 fi
                 
                 if [ "$type" = "psiphon" ]; then
-                    # Check if Psiphon is running
                     local psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
                     if ! pgrep -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}/psiphon_${country}.config" > /dev/null; then
                         print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
@@ -623,7 +608,6 @@ monitor_daemon() {
                         fi
                     fi
                 else
-                    # Tor monitoring (existing code)
                     data_dir="${DATA_DIR}/${country}"
                     full_name=$(get_full_name "$country")
                     
@@ -757,7 +741,6 @@ activate_tui() {
         return
     fi
     
-    # Select mode first
     local mode_choice=$(dialog --clear --title "Select Mode" \
         --menu "Choose network mode for activation:" 12 50 2 \
         1 "Tor (recommended, country-specific)" \
@@ -844,7 +827,6 @@ show_status_tui() {
                 printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
             fi
         else
-            # Tor
             if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
                 current_ip=$(get_tor_exit_ip "$port")
                 if [ -z "$current_ip" ]; then
