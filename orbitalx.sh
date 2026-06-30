@@ -14,6 +14,9 @@ set -e
 SCRIPT_NAME="OrbitalX"
 REPO_RAW_URL_SCRIPT="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/orbitalx.sh"
 REPO_RAW_URL_VERSION="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/VERSION"
+REPO_SERVER_ENTRIES_URL="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/assets/server_entries.txt"
+REPO_SERVER_DAT_URL="https://raw.githubusercontent.com/Issei-177013/OrbitalX/main/assets/server_list.dat"
+
 CONFIG_DIR="/etc/orbitalx"
 DATA_DIR="/var/lib/orbitalx"
 LOG_DIR="/var/log/orbitalx"
@@ -34,9 +37,9 @@ PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
 PSIPHON_DOWNLOAD_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
-# Server list mirror (GitHub raw)
-PSIPHON_SERVER_LIST_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/server_list/server_list_download"
-PSIPHON_SERVER_LIST_FILE="${PSIPHON_CONFIG_DIR}/server_list_download"
+PSIPHON_SERVER_LIST_URL="https://s3.amazonaws.com/psiphon/web/server_list_download"
+PSIPHON_SERVER_ENTRIES_FILE="${PSIPHON_CONFIG_DIR}/server_entries.txt"
+PSIPHON_SERVER_DAT_FILE="${PSIPHON_CONFIG_DIR}/server_list.dat"
 
 SELECTED_MODE="tor"
 
@@ -173,19 +176,135 @@ check_root() {
 
 # ==================== PSIPHON FUNCTIONS ====================
 
-download_psiphon_server_list() {
-    mkdir -p "$(dirname "$PSIPHON_SERVER_LIST_FILE")"
-    if [ -f "$PSIPHON_SERVER_LIST_FILE" ] && [ -s "$PSIPHON_SERVER_LIST_FILE" ]; then
+convert_dat_to_entries() {
+    local dat_file="$1"
+    local entries_file="$2"
+    
+    # Method 1: Use psiphon-tunnel-core binary if available
+    if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ]; then
+        print_info "Converting server_list.dat using psiphon-tunnel-core..."
+        if "$PSIPHON_BIN" -serverList > "$entries_file" 2>/dev/null && [ -s "$entries_file" ]; then
+            print_info "Conversion successful using psiphon-tunnel-core."
+            return 0
+        fi
+        print_warn "psiphon-tunnel-core conversion failed."
+    fi
+
+    # Method 2: Use Python with protobuf
+    if command -v python3 &> /dev/null; then
+        # Check if protobuf is installed
+        if python3 -c "import google.protobuf" 2>/dev/null; then
+            print_info "Converting server_list.dat using Python + protobuf..."
+            cat > /tmp/convert_psiphon.py << 'EOF'
+import sys
+import json
+import struct
+import os
+
+def parse_server_list_dat(file_path):
+    with open(file_path, 'rb') as f:
+        data = f.read()
+    
+    entries = []
+    i = 0
+    while i < len(data):
+        if i + 4 > len(data):
+            break
+        length = struct.unpack('<I', data[i:i+4])[0]
+        i += 4
+        if i + length > len(data):
+            break
+        entry_data = data[i:i+length]
+        i += length
+        try:
+            entry = json.loads(entry_data.decode('utf-8'))
+            entries.append(entry)
+        except:
+            continue
+    
+    return entries
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python3 convert_psiphon.py <input.dat> <output.txt>")
+        sys.exit(1)
+    
+    entries = parse_server_list_dat(sys.argv[1])
+    with open(sys.argv[2], 'w') as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + '\n')
+    
+    print(f"Converted {len(entries)} entries")
+EOF
+            if python3 /tmp/convert_psiphon.py "$dat_file" "$entries_file" && [ -s "$entries_file" ]; then
+                print_info "Conversion successful using Python."
+                rm -f /tmp/convert_psiphon.py
+                return 0
+            fi
+            rm -f /tmp/convert_psiphon.py
+        else
+            print_info "protobuf not installed. Attempting to install..."
+            if pip3 install protobuf 2>/dev/null || python3 -m pip install protobuf 2>/dev/null; then
+                print_info "protobuf installed. Retrying conversion..."
+                # Recursive call with protobuf now installed
+                convert_dat_to_entries "$dat_file" "$entries_file"
+                return $?
+            else
+                print_warn "Could not install protobuf. Skipping Python conversion."
+            fi
+        fi
+    fi
+
+    return 1
+}
+
+prepare_psiphon_server_entries() {
+    mkdir -p "$PSIPHON_CONFIG_DIR"
+    
+    # If server_entries.txt already exists and is not empty, use it
+    if [ -f "$PSIPHON_SERVER_ENTRIES_FILE" ] && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
+        print_info "Using existing server_entries.txt"
         return 0
     fi
-    print_info "Downloading Psiphon server list..."
-    if curl -sL -o "$PSIPHON_SERVER_LIST_FILE" "$PSIPHON_SERVER_LIST_URL"; then
-        print_info "Server list downloaded successfully."
-        return 0
+
+    # If server_list.dat exists, try to convert it
+    if [ -f "$PSIPHON_SERVER_DAT_FILE" ] && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
+        print_info "Found server_list.dat. Attempting to convert..."
+        if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$PSIPHON_SERVER_ENTRIES_FILE"; then
+            return 0
+        else
+            print_warn "Conversion failed. Trying to download from repository..."
+        fi
     else
-        print_warn "Failed to download server list. Will use fallback."
-        return 1
+        # Try to download server_list.dat from repository
+        print_info "Downloading server_list.dat from repository..."
+        if curl -sL -o "$PSIPHON_SERVER_DAT_FILE" "$REPO_SERVER_DAT_URL" && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
+            print_info "server_list.dat downloaded. Converting..."
+            if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$PSIPHON_SERVER_ENTRIES_FILE"; then
+                return 0
+            else
+                print_warn "Conversion failed after download."
+            fi
+        fi
     fi
+
+    # Fallback: download server_entries.txt directly from repository
+    print_info "Downloading server_entries.txt from repository (fallback)..."
+    if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$REPO_SERVER_ENTRIES_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
+        print_info "server_entries.txt downloaded successfully from repository."
+        return 0
+    fi
+
+    # Final fallback: try official Psiphon server list
+    print_warn "Could not get from repository. Trying official server list..."
+    if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$PSIPHON_SERVER_LIST_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
+        print_info "Server list downloaded from official source."
+        return 0
+    fi
+
+    # If all fails, give a clear error
+    set_error "Could not obtain server_entries.txt. Please manually place it in $PSIPHON_SERVER_ENTRIES_FILE"
+    return 1
 }
 
 install_psiphon() {
@@ -223,8 +342,10 @@ create_psiphon_config() {
 
     mkdir -p "$PSIPHON_CONFIG_DIR" "$data_dir"
 
-    # Ensure server list is available
-    download_psiphon_server_list
+    # Ensure server entries are available
+    if ! prepare_psiphon_server_entries; then
+        return 1
+    fi
 
     cat > "$config_file" << EOF
 {
@@ -232,12 +353,10 @@ create_psiphon_config() {
   "LocalSocksProxyPort": $port,
   "EgressRegion": "$country",
   "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-  "RemoteServerListDownloadURL": "file://$PSIPHON_SERVER_LIST_FILE",
-  "RemoteServerListSignatureURL": "",
-  "RemoteServerListObfuscatedURL": "",
   "SponsorId": "FFFFFFFFFFFFFFFF",
   "ClientId": "orbitalx",
   "DataStoreDirectory": "$data_dir",
+  "ServerEntriesFilename": "$PSIPHON_SERVER_ENTRIES_FILE",
   "ConnectionPoolSize": 2,
   "TunnelPoolSize": 2,
   "UseIndistinguishableTLS": true,
@@ -253,6 +372,10 @@ start_psiphon_instance() {
     local country=$1
     local port=$2
     local config_file=$(create_psiphon_config "$country" "$port")
+    
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
     
     if pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
         return 0
@@ -352,7 +475,7 @@ find_control_port() {
 
 install_missing_packages() {
     local missing=()
-    for cmd in tor curl nc ss pgrep pkill dialog wget file; do
+    for cmd in tor curl nc ss pgrep pkill dialog wget file python3 pip3; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -375,6 +498,7 @@ install_missing_packages() {
         ["dialog"]="dialog"
         ["wget"]="wget"
         ["file"]="file"
+        ["python3"]="python3 python3-pip"
     )
 
     local pkgs=()
@@ -619,7 +743,8 @@ monitor_daemon() {
                 
                 if [ "$type" = "psiphon" ]; then
                     local psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
-                    if ! pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then                        print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
+                    if ! pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
+                        print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
                         start_psiphon_instance "$country" "$psiphon_port"
                         sleep 3
                         local new_ip=$(get_psiphon_ip "$psiphon_port")
@@ -834,7 +959,7 @@ show_status_tui() {
         
         if [ "$type" = "psiphon" ]; then
             psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
-            if pgrep -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}/psiphon_${country}.config" > /dev/null; then
+            if pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
                 current_ip=$(get_psiphon_ip "$psiphon_port")
                 if [ -z "$current_ip" ]; then
                     printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
