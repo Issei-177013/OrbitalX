@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ===========================================================
-# OrbitalX - Tor Multi-Location Manager for Xray
+# OrbitalX - Tor/Psiphon Multi-Location Manager for Xray
 # Version: Read from VERSION file
 # Author: Issei-177013
 # Description: TUI-based management with predefined countries
-#              and fixed ports. Monitor interval configurable.
+#              and fixed ports. Supports Tor and Psiphon modes.
 # ===========================================================
 
 set -e
@@ -27,6 +27,16 @@ TUI_MODE=0
 
 # Global error message for TUI
 LAST_ERROR=""
+
+# Psiphon settings
+PSIPHON_BIN="/usr/local/bin/psiphon-tunnel-core"
+PSIPHON_CONFIG_DIR="${CONFIG_DIR}/psiphon"
+PSIPHON_BASE_SOCKS_PORT=1080
+PSIPHON_BASE_HTTP_PORT=8080
+PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/raw/master/psiphon-tunnel-core-x86_64"
+
+# Selected mode for activation (tor or psiphon)
+SELECTED_MODE="tor"
 
 # Full list of countries (35) in order as per image
 COUNTRIES_ORDERED=(
@@ -75,7 +85,7 @@ declare -A FULL_NAMES=(
     ["LU"]="Luxembourg"
 )
 
-# Assign ports starting from 9080
+# Assign ports starting from 9080 for Tor
 declare -A PREDEFINED_PORTS
 PORT=9080
 for country in "${COUNTRIES_ORDERED[@]}"; do
@@ -118,7 +128,6 @@ NC='\033[0m'
 # ==================== HELPER FUNCTIONS ====================
 
 log() {
-    # Ensure log directory exists (fallback to /tmp if not writable)
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
         LOG_DIR="/tmp/orbitalx"
         mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -166,124 +175,106 @@ check_root() {
     fi
 }
 
-# Install missing packages automatically
-install_missing_packages() {
-    local missing=()
-    for cmd in tor curl nc ss pgrep pkill dialog; do
-        if ! command -v "$cmd" &> /dev/null; then
-            missing+=("$cmd")
-        fi
-    done
+# ==================== PSIPHON FUNCTIONS ====================
 
-    if [ ${#missing[@]} -eq 0 ]; then
+install_psiphon() {
+    if [ -f "$PSIPHON_BIN" ]; then
         return 0
     fi
 
-    print_info "Missing packages: ${missing[*]}"
-    print_info "Attempting to install missing packages..."
+    print_info "Downloading Psiphon tunnel core..."
+    mkdir -p "$(dirname "$PSIPHON_BIN")"
+    
+    if wget -q -O "$PSIPHON_BIN" "$PSIPHON_DOWNLOAD_URL" 2>/dev/null || \
+       curl -sL "$PSIPHON_DOWNLOAD_URL" -o "$PSIPHON_BIN"; then
+        chmod +x "$PSIPHON_BIN"
+        print_info "Psiphon installed successfully."
+        return 0
+    else
+        set_error "Failed to download Psiphon. Please check network."
+        return 1
+    fi
+}
 
-    # Map command names to package names
-    declare -A PKG_MAP=(
-        ["tor"]="tor"
-        ["curl"]="curl"
-        ["nc"]="netcat-openbsd"
-        ["ss"]="iproute2"
-        ["pgrep"]="procps"
-        ["pkill"]="procps"
-        ["dialog"]="dialog"
-    )
+create_psiphon_config() {
+    local country=$1
+    local port=$2
+    local http_port=$((PSIPHON_BASE_HTTP_PORT + port - PSIPHON_BASE_SOCKS_PORT))
+    local config_file="${PSIPHON_CONFIG_DIR}/psiphon_${country}.config"
 
-    # Collect unique package names
-    local pkgs=()
-    for cmd in "${missing[@]}"; do
-        pkgs+=("${PKG_MAP[$cmd]}")
-    done
+    mkdir -p "$PSIPHON_CONFIG_DIR"
 
-    # Remove duplicates
-    pkgs=($(printf "%s\n" "${pkgs[@]}" | sort -u))
+    cat > "$config_file" << EOF
+{
+  "LocalHttpProxyPort": $http_port,
+  "LocalSocksProxyPort": $port,
+  "EgressRegion": "$country",
+  "PropagationChannelId": "FFFFFFFFFFFFFFFF",
+  "RemoteServerListDownloadURL": "",
+  "RemoteServerListSignatureURL": "",
+  "RemoteServerListObfuscatedURL": "",
+  "SponsorId": "FFFFFFFFFFFFFFFF",
+  "ClientId": "orbitalx",
+  "ConnectionPoolSize": 1,
+  "TunnelPoolSize": 1
+}
+EOF
+    echo "$config_file"
+}
 
-    # Update and install
-    apt update -y
-    apt install -y "${pkgs[@]}"
+start_psiphon_instance() {
+    local country=$1
+    local port=$2
+    local config_file=$(create_psiphon_config "$country" "$port")
+    
+    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
+        return 0
+    fi
 
-    # Re-check
-    local still_missing=()
-    for cmd in "${missing[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            still_missing+=("$cmd")
+    if [ ! -f "$PSIPHON_BIN" ]; then
+        if ! install_psiphon; then
+            return 1
         fi
-    done
+    fi
 
-    if [ ${#still_missing[@]} -ne 0 ]; then
-        print_error "Failed to install: ${still_missing[*]}"
-        print_info "Please install manually: sudo apt install ${still_missing[*]}"
+    print_info "Starting Psiphon for $(get_full_name "$country") on port $port..."
+    nohup "$PSIPHON_BIN" -config "$config_file" > /dev/null 2>&1 &
+    sleep 4
+
+    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
+        print_info "✅ Psiphon for $(get_full_name "$country") started on port $port"
+        return 0
+    else
+        set_error "Failed to start Psiphon for $(get_full_name "$country")"
         return 1
     fi
-
-    print_info "All missing packages installed successfully."
-    return 0
 }
 
-check_prerequisites() {
-    # Ensure dialog is installed (needed for TUI)
-    if ! command -v dialog &> /dev/null; then
-        print_info "Dialog is not installed. Installing..."
-        apt update -y && apt install -y dialog
-    fi
-
-    # Install other missing tools
-    if ! install_missing_packages; then
-        return 1
-    fi
-
-    return 0
-}
-
-create_dirs() {
-    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR"
+stop_psiphon_instance() {
+    local country=$1
+    local config_file="${PSIPHON_CONFIG_DIR}/psiphon_${country}.config"
     
-    if [ -f "$AVAILABLE_FILE" ]; then
-        declare -A existing
-        while IFS= read -r line; do
-            if [ -n "$line" ]; then
-                code=$(echo "$line" | cut -d':' -f1)
-                existing["$code"]=1
-            fi
-        done < "$AVAILABLE_FILE"
-        for code in "${COUNTRIES_ORDERED[@]}"; do
-            if [ -z "${existing[$code]}" ]; then
-                echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
-            fi
-        done
+    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
+        pkill -f "psiphon-tunnel-core.*${config_file}" && print_info "Stopped Psiphon for $(get_full_name "$country")"
+    fi
+}
+
+stop_all_psiphon() {
+    pkill -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}" 2>/dev/null || true
+    print_info "All Psiphon instances stopped."
+}
+
+get_psiphon_ip() {
+    local port=$1
+    local ip=$(curl -s --socks5-hostname 127.0.0.1:"$port" --max-time 5 https://api.ipify.org?format=text 2>/dev/null)
+    if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ip"
     else
-        for code in "${COUNTRIES_ORDERED[@]}"; do
-            echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
-        done
-    fi
-    
-    touch "$ACTIVE_FILE"
-    
-    if [ ! -f "$MONITOR_INTERVAL_FILE" ]; then
-        echo "$DEFAULT_MONITOR_INTERVAL" > "$MONITOR_INTERVAL_FILE"
+        echo ""
     fi
 }
 
-get_monitor_interval() {
-    if [ -f "$MONITOR_INTERVAL_FILE" ]; then
-        cat "$MONITOR_INTERVAL_FILE"
-    else
-        echo "$DEFAULT_MONITOR_INTERVAL"
-    fi
-}
-
-find_control_port() {
-    local base=10050
-    local port=$base
-    while ss -tuln | grep -q ":$port "; do
-        ((port++))
-    done
-    echo "$port"
-}
+# ==================== TOR FUNCTIONS ====================
 
 get_tor_exit_ip() {
     local port=$1
@@ -321,9 +312,122 @@ rotate_tor_ip() {
     return $?
 }
 
+find_control_port() {
+    local base=10050
+    local port=$base
+    while ss -tuln | grep -q ":$port "; do
+        ((port++))
+    done
+    echo "$port"
+}
+
+# ==================== INSTALL PREREQUISITES ====================
+
+install_missing_packages() {
+    local missing=()
+    for cmd in tor curl nc ss pgrep pkill dialog wget; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    print_info "Missing packages: ${missing[*]}"
+    print_info "Attempting to install missing packages..."
+
+    declare -A PKG_MAP=(
+        ["tor"]="tor"
+        ["curl"]="curl"
+        ["nc"]="netcat-openbsd"
+        ["ss"]="iproute2"
+        ["pgrep"]="procps"
+        ["pkill"]="procps"
+        ["dialog"]="dialog"
+        ["wget"]="wget"
+    )
+
+    local pkgs=()
+    for cmd in "${missing[@]}"; do
+        pkgs+=("${PKG_MAP[$cmd]}")
+    done
+    pkgs=($(printf "%s\n" "${pkgs[@]}" | sort -u))
+
+    apt update -y
+    apt install -y "${pkgs[@]}"
+
+    local still_missing=()
+    for cmd in "${missing[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            still_missing+=("$cmd")
+        fi
+    done
+
+    if [ ${#still_missing[@]} -ne 0 ]; then
+        print_error "Failed to install: ${still_missing[*]}"
+        print_info "Please install manually: sudo apt install ${still_missing[*]}"
+        return 1
+    fi
+
+    print_info "All missing packages installed successfully."
+    return 0
+}
+
+check_prerequisites() {
+    if ! command -v dialog &> /dev/null; then
+        print_info "Dialog is not installed. Installing..."
+        apt update -y && apt install -y dialog
+    fi
+
+    if ! install_missing_packages; then
+        return 1
+    fi
+
+    return 0
+}
+
+create_dirs() {
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$PSIPHON_CONFIG_DIR"
+    
+    if [ -f "$AVAILABLE_FILE" ]; then
+        declare -A existing
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                code=$(echo "$line" | cut -d':' -f1)
+                existing["$code"]=1
+            fi
+        done < "$AVAILABLE_FILE"
+        for code in "${COUNTRIES_ORDERED[@]}"; do
+            if [ -z "${existing[$code]}" ]; then
+                echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
+            fi
+        done
+    else
+        for code in "${COUNTRIES_ORDERED[@]}"; do
+            echo "$code:${PREDEFINED_PORTS[$code]}" >> "$AVAILABLE_FILE"
+        done
+    fi
+    
+    touch "$ACTIVE_FILE"
+    
+    if [ ! -f "$MONITOR_INTERVAL_FILE" ]; then
+        echo "$DEFAULT_MONITOR_INTERVAL" > "$MONITOR_INTERVAL_FILE"
+    fi
+}
+
+get_monitor_interval() {
+    if [ -f "$MONITOR_INTERVAL_FILE" ]; then
+        cat "$MONITOR_INTERVAL_FILE"
+    else
+        echo "$DEFAULT_MONITOR_INTERVAL"
+    fi
+}
+
 # ==================== CORE FUNCTIONS ====================
 
-activate_country() {
+activate_tor_country() {
     local country=$1
     local port=$2
     
@@ -349,7 +453,7 @@ EOF
     sleep 3
 
     if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-        set_error "Failed to start Tor for ${country}."
+        set_error "Failed to start Tor for $(get_full_name "$country")."
         echo "${country}:${port}" >> "$AVAILABLE_FILE"
         return 1
     fi
@@ -385,9 +489,55 @@ EOF
         return 1
     fi
 
-    echo "${country}:${port}:${control_port}:${exit_ip}" >> "$ACTIVE_FILE"
-    print_info "Activated $(get_full_name "$country") on port ${port} with IP ${exit_ip} (${ip_country})."
+    echo "${country}:${port}:${control_port}:${exit_ip}:tor" >> "$ACTIVE_FILE"
+    print_info "Activated $(get_full_name "$country") via Tor on port ${port} with IP ${exit_ip} (${ip_country})."
     return 0
+}
+
+activate_psiphon_country() {
+    local country=$1
+    local port=$2
+    
+    sed -i "/^${country}:/d" "$AVAILABLE_FILE"
+    
+    local psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
+    
+    if ! start_psiphon_instance "$country" "$psiphon_port"; then
+        echo "${country}:${port}" >> "$AVAILABLE_FILE"
+        return 1
+    fi
+
+    local exit_ip=""
+    local attempt=0
+    while [ $attempt -lt 8 ]; do
+        exit_ip=$(get_psiphon_ip "$psiphon_port")
+        if [ -n "$exit_ip" ]; then
+            break
+        fi
+        sleep 2
+        attempt=$((attempt+1))
+    done
+
+    if [ -z "$exit_ip" ]; then
+        exit_ip="unknown"
+        print_warn "Could not get IP for Psiphon $(get_full_name "$country")"
+    fi
+
+    echo "${country}:${port}:0:${exit_ip}:psiphon" >> "$ACTIVE_FILE"
+    print_info "Activated $(get_full_name "$country") via Psiphon on port ${psiphon_port} (Xray port: ${port}) with IP ${exit_ip}."
+    return 0
+}
+
+activate_country() {
+    local country=$1
+    local port=$2
+    local mode=$3
+    
+    if [ "$mode" = "psiphon" ]; then
+        activate_psiphon_country "$country" "$port"
+    else
+        activate_tor_country "$country" "$port"
+    fi
 }
 
 deactivate_country() {
@@ -398,22 +548,31 @@ deactivate_country() {
     fi
     
     local line=$(grep "^${country}:" "$ACTIVE_FILE")
-    IFS=':' read -r c port control_port ip <<< "$line"
+    IFS=':' read -r c port control_port ip type <<< "$line"
     
-    local data_dir="${DATA_DIR}/${country}"
-    pkill -f "tor -f ${data_dir}/torrc" || true
-    rm -rf "$data_dir"
+    if [ -z "$type" ]; then
+        type="tor"
+    fi
+    
+    if [ "$type" = "psiphon" ]; then
+        stop_psiphon_instance "$country"
+    else
+        local data_dir="${DATA_DIR}/${country}"
+        pkill -f "tor -f ${data_dir}/torrc" || true
+        rm -rf "$data_dir"
+    fi
     
     sed -i "/^${country}:/d" "$ACTIVE_FILE"
     echo "${country}:${port}" >> "$AVAILABLE_FILE"
     
-    print_info "Deactivated $(get_full_name "$country")."
+    print_info "Deactivated $(get_full_name "$country") (${type})."
     return 0
 }
 
 stop_all_instances() {
     pkill -f "tor -f ${DATA_DIR}/" || true
-    print_info "All Tor instances stopped."
+    stop_all_psiphon
+    print_info "All instances stopped."
 }
 
 monitor_daemon() {
@@ -421,69 +580,90 @@ monitor_daemon() {
     while true; do
         if [ -s "$ACTIVE_FILE" ]; then
             while IFS= read -r line; do
-                IFS=':' read -r country port control_port saved_ip <<< "$line"
-                data_dir="${DATA_DIR}/${country}"
-                full_name=$(get_full_name "$country")
+                IFS=':' read -r country port control_port saved_ip type <<< "$line"
                 
-                if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
-                    print_warn "${full_name} is down. Restarting..."
-                    tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
-                    sleep 5
-                    local new_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$new_ip" ]; then
-                        ip_country=$(get_ip_country "$new_ip")
-                        if [ "$ip_country" = "$country" ]; then
-                            sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                            print_info "Restored ${full_name} with IP ${new_ip} (${ip_country})"
-                        else
-                            print_error "After restart, IP ${new_ip} is in ${ip_country}, not ${country}. Manual intervention needed."
-                        fi
-                    fi
-                    continue
+                if [ -z "$type" ]; then
+                    type="tor"
                 fi
                 
-                if ! check_ip_quality "$port"; then
-                    print_warn "IP for ${full_name} is unreachable. Attempting to rotate..."
-                    local rotated=0
-                    for attempt in {1..3}; do
-                        if rotate_tor_ip "$control_port"; then
-                            sleep 5
-                            local new_ip=$(get_tor_exit_ip "$port")
-                            if [ -n "$new_ip" ]; then
-                                ip_country=$(get_ip_country "$new_ip")
-                                if [ "$ip_country" = "$country" ]; then
-                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Rotated IP for ${full_name}: ${new_ip} (${ip_country})"
-                                    rotated=1
-                                    break
-                                else
-                                    print_warn "Rotated IP ${new_ip} is in ${ip_country}, not ${country}. Trying again..."
-                                fi
-                            else
-                                print_warn "No IP after rotation, trying again..."
-                            fi
-                        fi
+                if [ "$type" = "psiphon" ]; then
+                    # Check if Psiphon is running
+                    local psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
+                    if ! pgrep -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}/psiphon_${country}.config" > /dev/null; then
+                        print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
+                        start_psiphon_instance "$country" "$psiphon_port"
                         sleep 3
-                    done
-                    if [ $rotated -eq 0 ]; then
-                        print_error "Could not get valid ${country} IP after 3 rotation attempts."
+                        local new_ip=$(get_psiphon_ip "$psiphon_port")
+                        if [ -n "$new_ip" ] && [ "$new_ip" != "$saved_ip" ]; then
+                            sed -i "s/^${country}:${port}:0:${saved_ip}:psiphon$/${country}:${port}:0:${new_ip}:psiphon/" "$ACTIVE_FILE"
+                            print_info "Updated IP for Psiphon $(get_full_name "$country"): ${new_ip}"
+                        fi
                     fi
                 else
-                    current_ip=$(get_tor_exit_ip "$port")
-                    if [ -n "$current_ip" ]; then
-                        ip_country=$(get_ip_country "$current_ip")
-                        if [ "$ip_country" != "$country" ]; then
-                            print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Attempting to fix..."
-                            rotate_tor_ip "$control_port"
-                            sleep 5
-                            new_ip=$(get_tor_exit_ip "$port")
-                            if [ -n "$new_ip" ]; then
-                                new_country=$(get_ip_country "$new_ip")
-                                if [ "$new_country" = "$country" ]; then
-                                    sed -i "s/^${country}:${port}:${control_port}:[^:]*$/${country}:${port}:${control_port}:${new_ip}/" "$ACTIVE_FILE"
-                                    print_info "✅ Forced rotation fixed IP for ${full_name}: ${new_ip} (${new_country})"
+                    # Tor monitoring (existing code)
+                    data_dir="${DATA_DIR}/${country}"
+                    full_name=$(get_full_name "$country")
+                    
+                    if ! pgrep -f "tor -f ${data_dir}/torrc" > /dev/null; then
+                        print_warn "${full_name} (Tor) is down. Restarting..."
+                        tor -f "${data_dir}/torrc" --RunAsDaemon 1 --Log "notice file ${LOG_DIR}/tor_${country}.log"
+                        sleep 5
+                        local new_ip=$(get_tor_exit_ip "$port")
+                        if [ -n "$new_ip" ]; then
+                            ip_country=$(get_ip_country "$new_ip")
+                            if [ "$ip_country" = "$country" ]; then
+                                sed -i "s/^${country}:${port}:${control_port}:[^:]*:tor$/${country}:${port}:${control_port}:${new_ip}:tor/" "$ACTIVE_FILE"
+                                print_info "Restored ${full_name} with IP ${new_ip} (${ip_country})"
+                            else
+                                print_error "After restart, IP ${new_ip} is in ${ip_country}, not ${country}. Manual intervention needed."
+                            fi
+                        fi
+                        continue
+                    fi
+                    
+                    if ! check_ip_quality "$port"; then
+                        print_warn "IP for ${full_name} (Tor) is unreachable. Attempting to rotate..."
+                        local rotated=0
+                        for attempt in {1..3}; do
+                            if rotate_tor_ip "$control_port"; then
+                                sleep 5
+                                local new_ip=$(get_tor_exit_ip "$port")
+                                if [ -n "$new_ip" ]; then
+                                    ip_country=$(get_ip_country "$new_ip")
+                                    if [ "$ip_country" = "$country" ]; then
+                                        sed -i "s/^${country}:${port}:${control_port}:[^:]*:tor$/${country}:${port}:${control_port}:${new_ip}:tor/" "$ACTIVE_FILE"
+                                        print_info "✅ Rotated IP for ${full_name}: ${new_ip} (${ip_country})"
+                                        rotated=1
+                                        break
+                                    else
+                                        print_warn "Rotated IP ${new_ip} is in ${ip_country}, not ${country}. Trying again..."
+                                    fi
                                 else
-                                    print_error "Cannot fix country for ${full_name}. Current IP: ${new_ip} (${new_country})"
+                                    print_warn "No IP after rotation, trying again..."
+                                fi
+                            fi
+                            sleep 3
+                        done
+                        if [ $rotated -eq 0 ]; then
+                            print_error "Could not get valid ${country} IP after 3 rotation attempts."
+                        fi
+                    else
+                        current_ip=$(get_tor_exit_ip "$port")
+                        if [ -n "$current_ip" ]; then
+                            ip_country=$(get_ip_country "$current_ip")
+                            if [ "$ip_country" != "$country" ]; then
+                                print_warn "IP changed to ${current_ip} (${ip_country}), not ${country}. Attempting to fix..."
+                                rotate_tor_ip "$control_port"
+                                sleep 5
+                                new_ip=$(get_tor_exit_ip "$port")
+                                if [ -n "$new_ip" ]; then
+                                    new_country=$(get_ip_country "$new_ip")
+                                    if [ "$new_country" = "$country" ]; then
+                                        sed -i "s/^${country}:${port}:${control_port}:[^:]*:tor$/${country}:${port}:${control_port}:${new_ip}:tor/" "$ACTIVE_FILE"
+                                        print_info "✅ Forced rotation fixed IP for ${full_name}: ${new_ip} (${new_country})"
+                                    else
+                                        print_error "Cannot fix country for ${full_name}. Current IP: ${new_ip} (${new_country})"
+                                    fi
                                 fi
                             fi
                         fi
@@ -500,7 +680,7 @@ monitor_daemon() {
 main_menu() {
     while true; do
         choice=$(dialog --clear --title "OrbitalX v${VERSION} - Issei-177013" \
-            --menu "Tor Location Manager for Xray" 18 60 10 \
+            --menu "Tor/Psiphon Location Manager for Xray" 18 60 10 \
             1 "Show Available Countries" \
             2 "Activate a Country" \
             3 "Show Active Status" \
@@ -554,6 +734,19 @@ activate_tui() {
         return
     fi
     
+    # Select mode first
+    local mode_choice=$(dialog --clear --title "Select Mode" \
+        --menu "Choose network mode for activation:" 12 50 2 \
+        1 "Tor (recommended, country-specific)" \
+        2 "Psiphon (faster, country may vary)" \
+        2>&1 >/dev/tty)
+    
+    case $mode_choice in
+        1) SELECTED_MODE="tor" ;;
+        2) SELECTED_MODE="psiphon" ;;
+        *) return ;;
+    esac
+    
     local items=()
     while IFS= read -r line; do
         IFS=':' read -r code port <<< "$line"
@@ -561,8 +754,8 @@ activate_tui() {
         items+=("$code" "$full_name [${code}] - Port: $port")
     done < "$AVAILABLE_FILE"
     
-    local country=$(dialog --clear --title "Activate Country" \
-        --menu "Select a country to activate" 20 70 15 "${items[@]}" \
+    local country=$(dialog --clear --title "Activate Country (${SELECTED_MODE})" \
+        --menu "Select a country to activate via ${SELECTED_MODE}" 20 70 15 "${items[@]}" \
         2>&1 >/dev/tty)
     
     if [ -n "$country" ]; then
@@ -570,17 +763,17 @@ activate_tui() {
         if [ -n "$port" ]; then
             (
                 set +e
-                activate_country "$country" "$port" > /tmp/orbitalx_activate.log 2>&1
+                activate_country "$country" "$port" "$SELECTED_MODE" > /tmp/orbitalx_activate.log 2>&1
                 echo $? > /tmp/orbitalx_activate.exit
             ) &
             pid=$!
             
-            dialog --title "Activating $(get_full_name "$country")..." --infobox "Please wait..." 5 40
+            dialog --title "Activating $(get_full_name "$country") via ${SELECTED_MODE}..." --infobox "Please wait..." 5 40
             wait $pid
             exit_code=$(cat /tmp/orbitalx_activate.exit 2>/dev/null || echo 1)
             
             if [ $exit_code -eq 0 ]; then
-                dialog --msgbox "✅ $(get_full_name "$country") activated successfully!\n\nUse port ${port} in Xray outbound." 8 50
+                dialog --msgbox "✅ $(get_full_name "$country") activated via ${SELECTED_MODE}!\n\nUse port ${port} in Xray outbound." 8 50
             else
                 show_error_tui
             fi
@@ -600,29 +793,53 @@ show_status_tui() {
     local tmp_file="/tmp/orbitalx_status.txt"
     > "$tmp_file"
     
-    printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "Country" "Port" "Status" "Exit IP" "Code" >> "$tmp_file"
-    printf "%s\n" "----------------------|--------|------------|-----------------|----------" >> "$tmp_file"
+    printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "Country" "Port" "Status" "Exit IP" "Code" "Type" >> "$tmp_file"
+    printf "%s\n" "----------------------|--------|------------|-----------------|----------|--------" >> "$tmp_file"
     
     while IFS= read -r line; do
-        IFS=':' read -r country port control_port saved_ip <<< "$line"
+        IFS=':' read -r country port control_port saved_ip type <<< "$line"
+        
+        if [ -z "$type" ]; then
+            type="tor"
+        fi
+        
         full_name=$(get_full_name "$country")
-        if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
-            current_ip=$(get_tor_exit_ip "$port")
-            if [ -z "$current_ip" ]; then
-                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
-            else
-                ip_country=$(get_ip_country "$current_ip")
-                printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "✅ Active" "$current_ip" "${ip_country:-?}" >> "$tmp_file"
-                if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
-                    sed -i "s/^${country}:${port}:${control_port}:${saved_ip}$/${country}:${port}:${control_port}:${current_ip}/" "$ACTIVE_FILE"
+        
+        if [ "$type" = "psiphon" ]; then
+            psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
+            if pgrep -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}/psiphon_${country}.config" > /dev/null; then
+                current_ip=$(get_psiphon_ip "$psiphon_port")
+                if [ -z "$current_ip" ]; then
+                    printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
+                else
+                    printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "✅ Active" "$current_ip" "$country" "$type" >> "$tmp_file"
+                    if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
+                        sed -i "s/^${country}:${port}:0:${saved_ip}:psiphon$/${country}:${port}:0:${current_ip}:psiphon/" "$ACTIVE_FILE"
+                    fi
                 fi
+            else
+                printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
             fi
         else
-            printf "%-20s | %-6s | %-10s | %-15s | %-8s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" >> "$tmp_file"
+            # Tor
+            if pgrep -f "tor -f ${DATA_DIR}/${country}/torrc" > /dev/null; then
+                current_ip=$(get_tor_exit_ip "$port")
+                if [ -z "$current_ip" ]; then
+                    printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "⚠️ Issue" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
+                else
+                    ip_country=$(get_ip_country "$current_ip")
+                    printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "✅ Active" "$current_ip" "${ip_country:-?}" "$type" >> "$tmp_file"
+                    if [ "$current_ip" != "$saved_ip" ] && [ "$saved_ip" != "unknown" ]; then
+                        sed -i "s/^${country}:${port}:${control_port}:${saved_ip}:tor$/${country}:${port}:${control_port}:${current_ip}:tor/" "$ACTIVE_FILE"
+                    fi
+                fi
+            else
+                printf "%-20s | %-6s | %-10s | %-15s | %-8s | %-6s\n" "$full_name" "$port" "❌ Stopped" "${saved_ip:-Unknown}" "$country" "$type" >> "$tmp_file"
+            fi
         fi
     done < "$ACTIVE_FILE"
     
-    dialog --title "Active Locations" --textbox "$tmp_file" 25 80
+    dialog --title "Active Locations" --textbox "$tmp_file" 25 90
     rm -f "$tmp_file"
 }
 
@@ -634,9 +851,12 @@ deactivate_tui() {
     
     local items=()
     while IFS= read -r line; do
-        IFS=':' read -r code port rest <<< "$line"
+        IFS=':' read -r code port control_port ip type <<< "$line"
+        if [ -z "$type" ]; then
+            type="tor"
+        fi
         full_name=$(get_full_name "$code")
-        items+=("$code" "$full_name [${code}] - Port: $port")
+        items+=("$code" "$full_name [${code}] - Port: $port (${type})")
     done < "$ACTIVE_FILE"
     
     local country=$(dialog --clear --title "Deactivate Country" \
@@ -680,7 +900,7 @@ set_interval_tui() {
 }
 
 stop_all_tui() {
-    dialog --yesno "Are you sure you want to stop all active Tor instances?" 6 50
+    dialog --yesno "Are you sure you want to stop all active instances (Tor + Psiphon)?" 6 50
     if [ $? -eq 0 ]; then
         (
             stop_all_instances > /tmp/orbitalx_stop.log 2>&1
@@ -740,7 +960,7 @@ update_tui() {
 uninstall_tui() {
     dialog --yesno "Are you sure you want to uninstall OrbitalX?" 6 50
     if [ $? -eq 0 ]; then
-        dialog --yesno "Delete all data (config, logs, Tor data)?" 6 50
+        dialog --yesno "Delete all data (config, logs, Tor data, Psiphon config)?" 6 50
         local delete_data=$?
         uninstall_core $delete_data
         dialog --msgbox "Uninstall complete." 6 30
@@ -777,9 +997,12 @@ install_core() {
     chmod +x "$tmp_script"
     mv "$tmp_script" /usr/local/bin/orbitalx
 
+    # Install Psiphon binary
+    install_psiphon
+
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
-Description=OrbitalX - Tor Multi-Location Manager
+Description=OrbitalX - Tor/Psiphon Multi-Location Manager
 After=network.target
 
 [Service]
@@ -878,10 +1101,8 @@ uninstall_core() {
 # ==================== CLI COMMANDS ====================
 
 cli_mode() {
-    # All CLI commands except 'help' require root
     case "$1" in
         help)
-            # help can be shown without root
             ;;
         *)
             check_root
@@ -900,7 +1121,7 @@ cli_mode() {
             ;;
         add)
             if [ -z "$2" ]; then
-                print_error "Usage: orbitalx add <COUNTRY>"
+                print_error "Usage: orbitalx add <COUNTRY> [tor|psiphon]"
                 exit 1
             fi
             country=$(echo "$2" | tr '[:lower:]' '[:upper:]')
@@ -908,8 +1129,12 @@ cli_mode() {
                 print_error "Country $(get_full_name "$country") not available."
                 exit 1
             fi
+            mode="${3:-tor}"
+            if [ "$mode" != "tor" ] && [ "$mode" != "psiphon" ]; then
+                mode="tor"
+            fi
             port=$(grep "^${country}:" "$AVAILABLE_FILE" | cut -d':' -f2)
-            activate_country "$country" "$port"
+            activate_country "$country" "$port" "$mode"
             ;;
         remove)
             if [ -z "$2" ]; then
@@ -923,9 +1148,10 @@ cli_mode() {
             if [ -s "$ACTIVE_FILE" ]; then
                 echo "Active Locations:"
                 while IFS= read -r line; do
-                    IFS=':' read -r code port control_port ip <<< "$line"
+                    IFS=':' read -r code port control_port ip type <<< "$line"
+                    [ -z "$type" ] && type="tor"
                     full_name=$(get_full_name "$code")
-                    echo "$full_name [$code] | Port: $port | IP: $ip"
+                    echo "$full_name [$code] | Port: $port | Type: $type | IP: $ip"
                 done < "$ACTIVE_FILE"
             else
                 echo "No active locations."
@@ -960,13 +1186,13 @@ cli_mode() {
             ;;
         help)
             cat << EOF
-OrbitalX v${VERSION} - Tor Location Manager
+OrbitalX v${VERSION} - Tor/Psiphon Location Manager
 
 CLI Commands:
   install                Install systemd service
   uninstall              Remove everything
   update                 Update from Git
-  add <COUNTRY>          Activate a country (e.g., DE)
+  add <COUNTRY> [tor|psiphon]  Activate a country (default: tor)
   remove <COUNTRY>       Deactivate a country
   status                 Show active locations
   available              Show available countries
