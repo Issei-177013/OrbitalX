@@ -254,7 +254,7 @@ start_psiphon_instance() {
     local port=$2
     local config_file=$(create_psiphon_config "$country" "$port")
     
-    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
+    if pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
         return 0
     fi
 
@@ -268,7 +268,7 @@ start_psiphon_instance() {
     nohup "$PSIPHON_BIN" -config "$config_file" >> "${LOG_DIR}/psiphon_${country}.log" 2>&1 &
     sleep 4
 
-    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
+    if pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
         print_info "✅ Psiphon for $(get_full_name "$country") started on port $port"
         return 0
     else
@@ -281,8 +281,8 @@ stop_psiphon_instance() {
     local country=$1
     local config_file="${PSIPHON_CONFIG_DIR}/psiphon_${country}.config"
     
-    if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
-        pkill -f "psiphon-tunnel-core.*${config_file}" && print_info "Stopped Psiphon for $(get_full_name "$country")"
+    if pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then
+        pkill -f "psiphon-tunnel-core.*psiphon_${country}\\.config" && print_info "Stopped Psiphon for $(get_full_name "$country")"
     fi
 }
 
@@ -619,8 +619,7 @@ monitor_daemon() {
                 
                 if [ "$type" = "psiphon" ]; then
                     local psiphon_port=$((PSIPHON_BASE_SOCKS_PORT + port - 9080))
-                    if ! pgrep -f "psiphon-tunnel-core.*${PSIPHON_CONFIG_DIR}/psiphon_${country}.config" > /dev/null; then
-                        print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
+                    if ! pgrep -f "psiphon-tunnel-core.*psiphon_${country}\\.config" > /dev/null; then                        print_warn "Psiphon for $(get_full_name "$country") is down. Restarting..."
                         start_psiphon_instance "$country" "$psiphon_port"
                         sleep 3
                         local new_ip=$(get_psiphon_ip "$psiphon_port")
