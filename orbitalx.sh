@@ -1173,18 +1173,142 @@ cli_mode() {
             list_instances
             ;;
         create-tor)
-            if [ -z "$2" ]; then
-                print_error "Usage: orbitalx create-tor <COUNTRY>"
+            shift
+            if [ $# -eq 0 ]; then
+                print_error "Usage: orbitalx create-tor <COUNTRY1> [COUNTRY2] ..."
                 exit 1
             fi
-            tor_create_instance "$2"
+            local success=0
+            local failed=0
+            local created=""
+            for country in "$@"; do
+                country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+                print_info "Creating Tor instance for $country..."
+                if tor_create_instance "$country"; then
+                    success=$((success + 1))
+                    created="${created} $country"
+                else
+                    failed=$((failed + 1))
+                    print_error "Failed to create Tor instance for $country"
+                fi
+            done
+            echo ""
+            echo "========================================"
+            echo "Summary: $success instance(s) created successfully, $failed failed."
+            if [ $success -gt 0 ]; then
+                echo "Created countries:${created}"
+            fi
+            echo "========================================"
             ;;
         create-psiphon)
-            if [ -z "$2" ]; then
-                print_error "Usage: orbitalx create-psiphon <COUNTRY>"
+            shift
+            if [ $# -eq 0 ]; then
+                print_error "Usage: orbitalx create-psiphon <COUNTRY1> [COUNTRY2] ..."
                 exit 1
             fi
-            psiphon_create_instance "$2"
+            local success=0
+            local failed=0
+            local created=""
+            for country in "$@"; do
+                country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+                print_info "Creating Psiphon instance for $country..."
+                if psiphon_create_instance "$country"; then
+                    success=$((success + 1))
+                    created="${created} $country"
+                else
+                    failed=$((failed + 1))
+                    print_error "Failed to create Psiphon instance for $country"
+                fi
+            done
+            echo ""
+            echo "========================================"
+            echo "Summary: $success instance(s) created successfully, $failed failed."
+            if [ $success -gt 0 ]; then
+                echo "Created countries:${created}"
+            fi
+            echo "========================================"
+            ;;
+        create)
+            shift
+            if [ $# -eq 0 ]; then
+                print_error "Usage: orbitalx create <COUNTRY1> [COUNTRY2] ..."
+                exit 1
+            fi
+            local tor_success=0
+            local tor_failed=0
+            local psiphon_success=0
+            local psiphon_failed=0
+            local psiphon_skipped=0
+            local tor_created=""
+            local psiphon_created=""
+            local psiphon_skipped_list=""
+
+            for country in "$@"; do
+                country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+
+                # Check if country is valid
+                if [ -z "${FULL_NAMES[$country]}" ]; then
+                    print_error "Invalid country code: $country (skipping)"
+                    continue
+                fi
+
+                echo ""
+                echo "========================================"
+                echo "Processing: $country ($(get_full_name "$country"))"
+                echo "========================================"
+
+                # Create Tor instance
+                print_info "Creating Tor instance for $country..."
+                if tor_create_instance "$country"; then
+                    tor_success=$((tor_success + 1))
+                    tor_created="${tor_created} $country"
+                else
+                    tor_failed=$((tor_failed + 1))
+                    print_error "Tor instance for $country failed"
+                fi
+
+                # Create Psiphon instance if supported
+                local psiphon_supported=0
+                for reg in "${PSIPHON_VALID_REGIONS[@]}"; do
+                    if [[ "$reg" == "$country" ]]; then
+                        psiphon_supported=1
+                        break
+                    fi
+                done
+
+                if [ $psiphon_supported -eq 1 ]; then
+                    print_info "Creating Psiphon instance for $country..."
+                    if psiphon_create_instance "$country"; then
+                        psiphon_success=$((psiphon_success + 1))
+                        psiphon_created="${psiphon_created} $country"
+                    else
+                        psiphon_failed=$((psiphon_failed + 1))
+                        print_error "Psiphon instance for $country failed"
+                    fi
+                else
+                    psiphon_skipped=$((psiphon_skipped + 1))
+                    psiphon_skipped_list="${psiphon_skipped_list} $country"
+                    print_warn "Skipping Psiphon for $country (not supported)"
+                fi
+            done
+
+            # Summary
+            echo ""
+            echo "========================================"
+            echo "             FINAL SUMMARY              "
+            echo "========================================"
+            echo "Tor:"
+            echo "  ✅ Success: $tor_success instance(s)"
+            [ $tor_success -gt 0 ] && echo "     Countries:${tor_created}"
+            [ $tor_failed -gt 0 ] && echo "  ❌ Failed: $tor_failed instance(s)"
+            echo ""
+            echo "Psiphon:"
+            echo "  ✅ Success: $psiphon_success instance(s)"
+            [ $psiphon_success -gt 0 ] && echo "     Countries:${psiphon_created}"
+            [ $psiphon_failed -gt 0 ] && echo "  ❌ Failed: $psiphon_failed instance(s)"
+            [ $psiphon_skipped -gt 0 ] && echo "  ⏭️  Skipped (unsupported): $psiphon_skipped instance(s)"
+            [ -n "$psiphon_skipped_list" ] && echo "     Countries:${psiphon_skipped_list}"
+            echo "========================================"
             ;;
         remove)
             if [ -z "$2" ]; then
@@ -1262,18 +1386,26 @@ cli_mode() {
 OrbitalX v${VERSION} - Hybrid Tor & Psiphon Manager
 
 CLI Commands:
-  install                Install systemd service
-  uninstall              Remove everything
-  update                 Update from GitHub
-  list                   List all instances
-  create-tor <COUNTRY>   Create a Tor instance
-  create-psiphon <COUNTRY> Create a Psiphon instance
-  remove <INSTANCE_ID>   Remove an instance
-  start <INSTANCE_ID>    Start an instance
-  stop <INSTANCE_ID>     Stop an instance
-  restart <INSTANCE_ID>  Restart an instance
-  status                 Show TUI status
-  help                   This help
+  install                           Install systemd service
+  uninstall                         Remove everything
+  update                            Update from GitHub
+  list                              List all instances
+  create <COUNTRY1> [COUNTRY2] ...  Create BOTH Tor and Psiphon instances for countries
+  create-tor <COUNTRY1> [COUNTRY2] ...  Create Tor instances only
+  create-psiphon <COUNTRY1> [COUNTRY2] ... Create Psiphon instances only
+  remove <INSTANCE_ID>              Remove an instance
+  start <INSTANCE_ID>               Start an instance
+  stop <INSTANCE_ID>                Stop an instance
+  restart <INSTANCE_ID>             Restart an instance
+  status                            Show TUI status
+  help                              This help
+
+Examples:
+  orbitalx create US TR GB DE
+  orbitalx create-tor US TR GB
+  orbitalx create-psiphon DE FR NL
+  orbitalx remove TOR-US-1
+  orbitalx start PSIPHON-DE-1
 
 Run without arguments for TUI menu.
 EOF
