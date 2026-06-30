@@ -469,8 +469,9 @@ find_control_port() {
 # ==================== INSTALL PREREQUISITES ====================
 
 install_missing_packages() {
+    # Remove pip3 from check - it's not a standalone command
     local missing=()
-    for cmd in tor curl nc ss pgrep pkill dialog wget file python3 pip3; do
+    for cmd in tor curl nc ss pgrep pkill dialog wget file python3; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
