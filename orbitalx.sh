@@ -217,14 +217,14 @@ create_psiphon_config() {
   "LocalSocksProxyPort": $port,
   "EgressRegion": "$country",
   "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-  "RemoteServerListDownloadURL": "https://s3.amazonaws.com/psiphon/web/server_list_download",
-  "RemoteServerListSignatureURL": "https://s3.amazonaws.com/psiphon/web/server_list_signature",
-  "RemoteServerListObfuscatedURL": "https://s3.amazonaws.com/psiphon/web/server_list_obfuscated",
   "SponsorId": "FFFFFFFFFFFFFFFF",
   "ClientId": "orbitalx",
   "DataStoreDirectory": "$data_dir",
   "ConnectionPoolSize": 2,
-  "TunnelPoolSize": 2
+  "TunnelPoolSize": 2,
+  "UseIndistinguishableTLS": true,
+  "UseDnsCache": true,
+  "EnableNetworkMonitor": false
 }
 EOF
     echo "$config_file"
@@ -516,14 +516,18 @@ activate_psiphon_country() {
         return 1
     fi
 
+    # Wait longer for Psiphon to establish connection
+    sleep 10
+
     local exit_ip=""
     local attempt=0
-    while [ $attempt -lt 8 ]; do
+    while [ $attempt -lt 20 ]; do
         exit_ip=$(get_psiphon_ip "$psiphon_port")
         if [ -n "$exit_ip" ]; then
             break
         fi
-        sleep 2
+        print_warn "Waiting for Psiphon IP... (attempt $((attempt+1))/20)"
+        sleep 3
         attempt=$((attempt+1))
     done
 
