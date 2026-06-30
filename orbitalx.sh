@@ -34,6 +34,9 @@ PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
 PSIPHON_DOWNLOAD_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
+# Server list mirror (GitHub raw)
+PSIPHON_SERVER_LIST_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/server_list/server_list_download"
+PSIPHON_SERVER_LIST_FILE="${PSIPHON_CONFIG_DIR}/server_list_download"
 
 SELECTED_MODE="tor"
 
@@ -170,8 +173,22 @@ check_root() {
 
 # ==================== PSIPHON FUNCTIONS ====================
 
+download_psiphon_server_list() {
+    mkdir -p "$(dirname "$PSIPHON_SERVER_LIST_FILE")"
+    if [ -f "$PSIPHON_SERVER_LIST_FILE" ] && [ -s "$PSIPHON_SERVER_LIST_FILE" ]; then
+        return 0
+    fi
+    print_info "Downloading Psiphon server list..."
+    if curl -sL -o "$PSIPHON_SERVER_LIST_FILE" "$PSIPHON_SERVER_LIST_URL"; then
+        print_info "Server list downloaded successfully."
+        return 0
+    else
+        print_warn "Failed to download server list. Will use fallback."
+        return 1
+    fi
+}
+
 install_psiphon() {
-    # Check if existing binary is valid
     if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ] && file "$PSIPHON_BIN" | grep -q "ELF"; then
         return 0
     fi
@@ -180,24 +197,19 @@ install_psiphon() {
     mkdir -p "$(dirname "$PSIPHON_BIN")"
     
     local tmp_file="/tmp/psiphon_download"
-    # Use curl with user-agent to avoid GitHub blocking
     if curl -L -H "User-Agent: Mozilla/5.0" -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL"; then
-        # Verify it's an ELF binary
         if file "$tmp_file" | grep -q "ELF"; then
             chmod +x "$tmp_file"
             mv "$tmp_file" "$PSIPHON_BIN"
             print_info "Psiphon installed successfully."
             return 0
         else
-            print_error "Downloaded file is not a valid ELF binary (may be HTML)."
+            print_error "Downloaded file is not a valid ELF binary."
             rm -f "$tmp_file"
-            print_info "Please manually download Psiphon from:"
-            echo "  $PSIPHON_DOWNLOAD_URL"
-            echo "and place it in $PSIPHON_BIN, then chmod +x."
             return 1
         fi
     else
-        set_error "Failed to download Psiphon. Please check network connectivity."
+        set_error "Failed to download Psiphon."
         return 1
     fi
 }
@@ -211,15 +223,18 @@ create_psiphon_config() {
 
     mkdir -p "$PSIPHON_CONFIG_DIR" "$data_dir"
 
+    # Ensure server list is available
+    download_psiphon_server_list
+
     cat > "$config_file" << EOF
 {
   "LocalHttpProxyPort": $http_port,
   "LocalSocksProxyPort": $port,
   "EgressRegion": "$country",
   "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-  "RemoteServerListDownloadURL": "https://s3.amazonaws.com/psiphon/web/server_list_download",
-  "RemoteServerListSignatureURL": "https://s3.amazonaws.com/psiphon/web/server_list_signature",
-  "RemoteServerListObfuscatedURL": "https://s3.amazonaws.com/psiphon/web/server_list_obfuscated",
+  "RemoteServerListDownloadURL": "file://$PSIPHON_SERVER_LIST_FILE",
+  "RemoteServerListSignatureURL": "",
+  "RemoteServerListObfuscatedURL": "",
   "SponsorId": "FFFFFFFFFFFFFFFF",
   "ClientId": "orbitalx",
   "DataStoreDirectory": "$data_dir",
@@ -227,7 +242,8 @@ create_psiphon_config() {
   "TunnelPoolSize": 2,
   "UseIndistinguishableTLS": true,
   "UseDnsCache": true,
-  "EnableNetworkMonitor": false
+  "EnableNetworkMonitor": false,
+  "TunnelEstablishTimeout": 60
 }
 EOF
     echo "$config_file"
@@ -519,7 +535,6 @@ activate_psiphon_country() {
         return 1
     fi
 
-    # Wait longer for Psiphon to establish connection
     sleep 10
 
     local exit_ip=""
