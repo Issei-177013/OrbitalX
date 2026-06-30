@@ -304,28 +304,32 @@ prepare_psiphon_server_entries() {
 }
 
 install_psiphon() {
+    # Check if already installed and valid
     if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ] && file "$PSIPHON_BIN" | grep -q "ELF"; then
+        print_info "Psiphon binary already exists and is valid."
         return 0
     fi
 
-    print_info "Downloading Psiphon tunnel core..."
+    print_info "Downloading Psiphon tunnel core from $PSIPHON_DOWNLOAD_URL..."
     mkdir -p "$(dirname "$PSIPHON_BIN")"
     
     local tmp_file="/tmp/psiphon_download"
-    if curl -L -H "User-Agent: Mozilla/5.0" -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL"; then
+    if curl -L -H "User-Agent: Mozilla/5.0" -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL" 2>/dev/null; then
         if file "$tmp_file" | grep -q "ELF"; then
             chmod +x "$tmp_file"
             mv "$tmp_file" "$PSIPHON_BIN"
-            print_info "Psiphon installed successfully."
+            print_info "✅ Psiphon installed successfully."
             return 0
         else
-            print_error "Downloaded file is not a valid ELF binary."
+            print_error "Downloaded file is not a valid ELF binary (may be HTML or error page)."
             rm -f "$tmp_file"
-            return 1
+            print_warn "Psiphon will not be available, but Tor mode will still work."
+            return 0   # Don't fail the entire installation; Tor still works
         fi
     else
-        set_error "Failed to download Psiphon."
-        return 1
+        print_error "Failed to download Psiphon (curl error)."
+        print_warn "Psiphon will not be available, but Tor mode will still work."
+        return 0   # Don't fail
     fi
 }
 
@@ -469,7 +473,6 @@ find_control_port() {
 # ==================== INSTALL PREREQUISITES ====================
 
 install_missing_packages() {
-    # Remove pip3 from check - it's not a standalone command
     local missing=()
     for cmd in tor curl nc ss pgrep pkill dialog wget file python3; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -478,6 +481,7 @@ install_missing_packages() {
     done
 
     if [ ${#missing[@]} -eq 0 ]; then
+        print_info "All prerequisite packages are already installed."
         return 0
     fi
 
@@ -1113,34 +1117,58 @@ uninstall_tui() {
 # ==================== CORE INSTALL/UPDATE/UNINSTALL ====================
 
 install_core() {
+    echo "=== Starting installation ==="
     check_root
-    check_prerequisites || return 1
+    echo "✓ Root privileges confirmed."
+
+    echo "→ Checking prerequisites..."
+    check_prerequisites || {
+        echo "✗ Prerequisites check failed."
+        return 1
+    }
+    echo "✓ Prerequisites satisfied."
+
+    echo "→ Creating directories..."
     create_dirs
+    echo "✓ Directories created."
 
-    print_info "Downloading OrbitalX from GitHub..."
+    echo "→ Downloading OrbitalX script from GitHub..."
     local tmp_script="/tmp/orbitalx_install.sh"
-    local tmp_version="/tmp/orbitalx_version"
-
-    curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
-    if [ $? -ne 0 ] || [ ! -s "$tmp_script" ]; then
+    if ! curl -sL -o "$tmp_script" "$REPO_RAW_URL_SCRIPT"; then
+        echo "✗ Failed to download script."
         set_error "Failed to download script from GitHub."
         return 1
     fi
+    if [ ! -s "$tmp_script" ]; then
+        echo "✗ Downloaded script is empty."
+        set_error "Downloaded script is empty."
+        return 1
+    fi
+    echo "✓ Script downloaded."
 
-    curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version"
-    if [ $? -eq 0 ] && [ -s "$tmp_version" ]; then
-        cp "$tmp_version" /usr/local/bin/VERSION
+    echo "→ Downloading VERSION file..."
+    local tmp_version="/tmp/orbitalx_version"
+    if curl -sL -o "$tmp_version" "$REPO_RAW_URL_VERSION"; then
+        if [ -s "$tmp_version" ]; then
+            cp "$tmp_version" /usr/local/bin/VERSION
+            echo "✓ VERSION file installed."
+        else
+            echo "⚠ VERSION file is empty, using fallback."
+            echo "0.0.0" > /usr/local/bin/VERSION
+        fi
     else
+        echo "⚠ Could not download VERSION, using fallback."
         echo "0.0.0" > /usr/local/bin/VERSION
-        print_warn "Could not download VERSION, using fallback 0.0.0"
     fi
 
     chmod +x "$tmp_script"
     mv "$tmp_script" /usr/local/bin/orbitalx
+    echo "✓ OrbitalX installed to /usr/local/bin/orbitalx"
 
-    # Install Psiphon binary
+    echo "→ Installing Psiphon (optional)..."
     install_psiphon
 
+    echo "→ Installing systemd service..."
     cat > /etc/systemd/system/orbitalx.service << EOF
 [Unit]
 Description=OrbitalX - Tor/Psiphon Multi-Location Manager
@@ -1157,13 +1185,16 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
+    echo "✓ Service file created."
 
     systemctl daemon-reload
     systemctl enable orbitalx.service
     systemctl start orbitalx.service
+    echo "✓ Systemd service enabled and started."
 
     VERSION=$(get_version)
-    print_info "Installation complete. Service enabled and started."
+    echo "✅ Installation complete. Version: $VERSION"
+    echo "Service is running. Use 'sudo orbitalx' to open the TUI menu."
     return 0
 }
 
