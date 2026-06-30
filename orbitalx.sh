@@ -30,15 +30,15 @@ TUI_MODE=0
 
 LAST_ERROR=""
 
-# Psiphon settings
+# Psiphon settings - using /tmp for config to avoid path length issues
 PSIPHON_BIN="/usr/local/bin/psiphon-tunnel-core"
-PSIPHON_CONFIG_DIR="${CONFIG_DIR}/psiphon"
+PSIPHON_CONFIG_DIR="/tmp/psiphon"
 PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
 PSIPHON_DOWNLOAD_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
 PSIPHON_SERVER_LIST_URL="https://s3.amazonaws.com/psiphon/web/server_list_download"
-PSIPHON_SERVER_ENTRIES_FILE="/tmp/se.txt"  # مسیر کوتاه‌تر برای جلوگیری از خطای file name too long
+PSIPHON_SERVER_ENTRIES_FILE="/tmp/se.txt"
 
 SELECTED_MODE="tor"
 
@@ -176,13 +176,11 @@ check_root() {
 # ==================== INSTALLATION CHECK ====================
 
 is_installed() {
-    # اگر اسکریپت از stdin یا pipe اجرا می‌شود، فقط وجود فایل را بررسی کن
     if [ ! -t 0 ] || [ -p /dev/stdin ] || [ "$0" = "bash" ] || [[ "$0" == *"/dev/fd/"* ]]; then
         [ -f "/usr/local/bin/orbitalx" ] && [ -x "/usr/local/bin/orbitalx" ]
         return $?
     fi
     
-    # در غیر این صورت، مسیر واقعی را مقایسه کن
     local installed_path="/usr/local/bin/orbitalx"
     if [ -f "$installed_path" ] && [ "$(realpath "$0" 2>/dev/null)" = "$(realpath "$installed_path" 2>/dev/null)" ]; then
         return 0
@@ -267,53 +265,27 @@ EOF
 }
 
 prepare_psiphon_server_entries() {
-    mkdir -p "$PSIPHON_CONFIG_DIR"
+    mkdir -p "$PSIPHON_CONFIG_DIR" 2>/dev/null || true
     local temp_entries_file="${PSIPHON_CONFIG_DIR}/server_entries.txt"
     
-    # اگر فایل در مسیر کوتاه وجود دارد، استفاده کن
     if [ -f "$PSIPHON_SERVER_ENTRIES_FILE" ] && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
         print_info "Using existing server_entries.txt at $PSIPHON_SERVER_ENTRIES_FILE"
         return 0
     fi
     
-    # اگر فایل اصلی در مسیر معمولی وجود دارد، کپی کن به مسیر کوتاه
     if [ -f "$temp_entries_file" ] && [ -s "$temp_entries_file" ]; then
         cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
         print_info "Copied existing server_entries.txt to short path."
         return 0
     fi
 
-    # اگر server_list.dat وجود دارد، سعی به تبدیل کن
-    if [ -f "$PSIPHON_SERVER_DAT_FILE" ] && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
-        print_info "Found server_list.dat. Attempting to convert..."
-        if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$temp_entries_file"; then
-            cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
-            return 0
-        else
-            print_warn "Conversion failed. Trying to download from repository..."
-        fi
-    else
-        print_info "Downloading server_list.dat from repository..."
-        if curl -sL -o "$PSIPHON_SERVER_DAT_FILE" "$REPO_SERVER_DAT_URL" && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
-            print_info "server_list.dat downloaded. Converting..."
-            if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$temp_entries_file"; then
-                cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
-                return 0
-            else
-                print_warn "Conversion failed after download."
-            fi
-        fi
-    fi
-
-    # Fallback: دانلود مستقیم server_entries.txt از مخزن
-    print_info "Downloading server_entries.txt from repository (fallback)..."
+    print_info "Downloading server_entries.txt from repository..."
     if curl -sL -o "$temp_entries_file" "$REPO_SERVER_ENTRIES_URL" && [ -s "$temp_entries_file" ]; then
         cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
-        print_info "server_entries.txt downloaded successfully from repository."
+        print_info "server_entries.txt downloaded successfully."
         return 0
     fi
 
-    # تلاش از سرور رسمی Psiphon
     print_warn "Could not get from repository. Trying official server list..."
     if curl -sL -o "$temp_entries_file" "$PSIPHON_SERVER_LIST_URL" && [ -s "$temp_entries_file" ]; then
         cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
@@ -361,7 +333,14 @@ create_psiphon_config() {
     local config_file="${PSIPHON_CONFIG_DIR}/psiphon_${country}.config"
     local data_dir="${PSIPHON_DATA_DIR}/${country}"
 
-    mkdir -p "$PSIPHON_CONFIG_DIR" "$data_dir"
+    mkdir -p "$PSIPHON_CONFIG_DIR" || {
+        set_error "Failed to create config directory: $PSIPHON_CONFIG_DIR"
+        return 1
+    }
+    mkdir -p "$data_dir" || {
+        set_error "Failed to create data directory: $data_dir"
+        return 1
+    }
 
     if ! prepare_psiphon_server_entries; then
         return 1
@@ -385,6 +364,12 @@ create_psiphon_config() {
   "TunnelEstablishTimeout": 60
 }
 EOF
+
+    if [ ! -f "$config_file" ]; then
+        set_error "Config file was not created: $config_file"
+        return 1
+    fi
+
     echo "$config_file"
 }
 
@@ -393,7 +378,8 @@ start_psiphon_instance() {
     local port=$2
     local config_file=$(create_psiphon_config "$country" "$port")
     
-    if [ $? -ne 0 ]; then
+    if [ $? -ne 0 ] || [ ! -f "$config_file" ]; then
+        set_error "Config file missing: $config_file"
         return 1
     fi
     
@@ -556,7 +542,8 @@ check_prerequisites() {
 }
 
 create_dirs() {
-    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$PSIPHON_CONFIG_DIR" "$PSIPHON_DATA_DIR"
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$PSIPHON_DATA_DIR"
+    mkdir -p "$PSIPHON_CONFIG_DIR" 2>/dev/null || true
     
     if [ -f "$AVAILABLE_FILE" ]; then
         declare -A existing
