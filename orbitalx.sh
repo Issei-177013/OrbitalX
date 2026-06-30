@@ -33,7 +33,7 @@ PSIPHON_CONFIG_DIR="${CONFIG_DIR}/psiphon"
 PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
-PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/releases/latest/download/psiphon-tunnel-core-x86_64"
+PSIPHON_DOWNLOAD_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
 
 SELECTED_MODE="tor"
 
