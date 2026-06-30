@@ -38,8 +38,7 @@ PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
 PSIPHON_DOWNLOAD_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
 PSIPHON_SERVER_LIST_URL="https://s3.amazonaws.com/psiphon/web/server_list_download"
-PSIPHON_SERVER_ENTRIES_FILE="${PSIPHON_CONFIG_DIR}/server_entries.txt"
-PSIPHON_SERVER_DAT_FILE="${PSIPHON_CONFIG_DIR}/server_list.dat"
+PSIPHON_SERVER_ENTRIES_FILE="/tmp/se.txt"  # مسیر کوتاه‌تر برای جلوگیری از خطای file name too long
 
 SELECTED_MODE="tor"
 
@@ -269,15 +268,26 @@ EOF
 
 prepare_psiphon_server_entries() {
     mkdir -p "$PSIPHON_CONFIG_DIR"
+    local temp_entries_file="${PSIPHON_CONFIG_DIR}/server_entries.txt"
     
+    # اگر فایل در مسیر کوتاه وجود دارد، استفاده کن
     if [ -f "$PSIPHON_SERVER_ENTRIES_FILE" ] && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
-        print_info "Using existing server_entries.txt"
+        print_info "Using existing server_entries.txt at $PSIPHON_SERVER_ENTRIES_FILE"
+        return 0
+    fi
+    
+    # اگر فایل اصلی در مسیر معمولی وجود دارد، کپی کن به مسیر کوتاه
+    if [ -f "$temp_entries_file" ] && [ -s "$temp_entries_file" ]; then
+        cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
+        print_info "Copied existing server_entries.txt to short path."
         return 0
     fi
 
+    # اگر server_list.dat وجود دارد، سعی به تبدیل کن
     if [ -f "$PSIPHON_SERVER_DAT_FILE" ] && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
         print_info "Found server_list.dat. Attempting to convert..."
-        if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$PSIPHON_SERVER_ENTRIES_FILE"; then
+        if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$temp_entries_file"; then
+            cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
             return 0
         else
             print_warn "Conversion failed. Trying to download from repository..."
@@ -286,7 +296,8 @@ prepare_psiphon_server_entries() {
         print_info "Downloading server_list.dat from repository..."
         if curl -sL -o "$PSIPHON_SERVER_DAT_FILE" "$REPO_SERVER_DAT_URL" && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
             print_info "server_list.dat downloaded. Converting..."
-            if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$PSIPHON_SERVER_ENTRIES_FILE"; then
+            if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$temp_entries_file"; then
+                cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
                 return 0
             else
                 print_warn "Conversion failed after download."
@@ -294,14 +305,18 @@ prepare_psiphon_server_entries() {
         fi
     fi
 
+    # Fallback: دانلود مستقیم server_entries.txt از مخزن
     print_info "Downloading server_entries.txt from repository (fallback)..."
-    if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$REPO_SERVER_ENTRIES_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
+    if curl -sL -o "$temp_entries_file" "$REPO_SERVER_ENTRIES_URL" && [ -s "$temp_entries_file" ]; then
+        cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
         print_info "server_entries.txt downloaded successfully from repository."
         return 0
     fi
 
+    # تلاش از سرور رسمی Psiphon
     print_warn "Could not get from repository. Trying official server list..."
-    if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$PSIPHON_SERVER_LIST_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
+    if curl -sL -o "$temp_entries_file" "$PSIPHON_SERVER_LIST_URL" && [ -s "$temp_entries_file" ]; then
+        cp "$temp_entries_file" "$PSIPHON_SERVER_ENTRIES_FILE"
         print_info "Server list downloaded from official source."
         return 0
     fi
@@ -1395,13 +1410,11 @@ if [ $# -eq 0 ]; then
     TUI_MODE=1
     check_root
 
-    # اگر نصب نیست، فقط یک هشدار نمایش بده و ادامه بده (تا کاربر از TUI نصب کند)
     if ! is_installed; then
         echo "⚠️  OrbitalX is not installed on this system."
         echo "   You can install it from the TUI menu: Administration → Install"
         echo "   Or run: sudo orbitalx install"
         echo ""
-        # منتظر یک ثانیه تا کاربر پیام را ببیند
         sleep 1
     fi
 
