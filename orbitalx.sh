@@ -31,9 +31,11 @@ LAST_ERROR=""
 # Psiphon settings
 PSIPHON_BIN="/usr/local/bin/psiphon-tunnel-core"
 PSIPHON_CONFIG_DIR="${CONFIG_DIR}/psiphon"
+PSIPHON_DATA_DIR="${DATA_DIR}/psiphon"
 PSIPHON_BASE_SOCKS_PORT=1080
 PSIPHON_BASE_HTTP_PORT=8080
-PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/raw/master/psiphon-tunnel-core-x86_64"
+# Updated download URL to latest release
+PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/releases/latest/download/psiphon-tunnel-core-x86_64"
 
 # Selected mode for activation (tor or psiphon)
 SELECTED_MODE="tor"
@@ -178,20 +180,37 @@ check_root() {
 # ==================== PSIPHON FUNCTIONS ====================
 
 install_psiphon() {
-    if [ -f "$PSIPHON_BIN" ]; then
-        return 0
+    # If binary exists and is executable and is an ELF file, assume it's valid
+    if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ]; then
+        if file "$PSIPHON_BIN" | grep -q "ELF"; then
+            return 0
+        fi
     fi
 
     print_info "Downloading Psiphon tunnel core..."
     mkdir -p "$(dirname "$PSIPHON_BIN")"
     
-    if wget -q -O "$PSIPHON_BIN" "$PSIPHON_DOWNLOAD_URL" 2>/dev/null || \
-       curl -sL "$PSIPHON_DOWNLOAD_URL" -o "$PSIPHON_BIN"; then
-        chmod +x "$PSIPHON_BIN"
+    local tmp_file="/tmp/psiphon_download"
+    # Use curl with -L to follow redirects, -o to output
+    if curl -sL -o "$tmp_file" "$PSIPHON_DOWNLOAD_URL"; then
+        # Check if downloaded file is HTML (bad redirect)
+        if file "$tmp_file" | grep -q "HTML"; then
+            print_error "Downloaded file is HTML (likely a redirect or error). URL may be invalid."
+            rm -f "$tmp_file"
+            return 1
+        fi
+        # Check if it's empty
+        if [ ! -s "$tmp_file" ]; then
+            print_error "Downloaded file is empty."
+            rm -f "$tmp_file"
+            return 1
+        fi
+        chmod +x "$tmp_file"
+        mv "$tmp_file" "$PSIPHON_BIN"
         print_info "Psiphon installed successfully."
         return 0
     else
-        set_error "Failed to download Psiphon. Please check network."
+        set_error "Failed to download Psiphon. Please check network connectivity."
         return 1
     fi
 }
@@ -201,8 +220,9 @@ create_psiphon_config() {
     local port=$2
     local http_port=$((PSIPHON_BASE_HTTP_PORT + port - PSIPHON_BASE_SOCKS_PORT))
     local config_file="${PSIPHON_CONFIG_DIR}/psiphon_${country}.config"
+    local data_dir="${PSIPHON_DATA_DIR}/${country}"
 
-    mkdir -p "$PSIPHON_CONFIG_DIR"
+    mkdir -p "$PSIPHON_CONFIG_DIR" "$data_dir"
 
     cat > "$config_file" << EOF
 {
@@ -210,13 +230,14 @@ create_psiphon_config() {
   "LocalSocksProxyPort": $port,
   "EgressRegion": "$country",
   "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-  "RemoteServerListDownloadURL": "",
-  "RemoteServerListSignatureURL": "",
-  "RemoteServerListObfuscatedURL": "",
+  "RemoteServerListDownloadURL": "https://s3.amazonaws.com/psiphon/web/server_list_download",
+  "RemoteServerListSignatureURL": "https://s3.amazonaws.com/psiphon/web/server_list_signature",
+  "RemoteServerListObfuscatedURL": "https://s3.amazonaws.com/psiphon/web/server_list_obfuscated",
   "SponsorId": "FFFFFFFFFFFFFFFF",
   "ClientId": "orbitalx",
-  "ConnectionPoolSize": 1,
-  "TunnelPoolSize": 1
+  "DataStoreDirectory": "$data_dir",
+  "ConnectionPoolSize": 2,
+  "TunnelPoolSize": 2
 }
 EOF
     echo "$config_file"
@@ -238,14 +259,15 @@ start_psiphon_instance() {
     fi
 
     print_info "Starting Psiphon for $(get_full_name "$country") on port $port..."
-    nohup "$PSIPHON_BIN" -config "$config_file" > /dev/null 2>&1 &
+    # Redirect stdout and stderr to a log file for debugging
+    nohup "$PSIPHON_BIN" -config "$config_file" >> "${LOG_DIR}/psiphon_${country}.log" 2>&1 &
     sleep 4
 
     if pgrep -f "psiphon-tunnel-core.*${config_file}" > /dev/null; then
         print_info "✅ Psiphon for $(get_full_name "$country") started on port $port"
         return 0
     else
-        set_error "Failed to start Psiphon for $(get_full_name "$country")"
+        set_error "Failed to start Psiphon for $(get_full_name "$country"). Check log: ${LOG_DIR}/psiphon_${country}.log"
         return 1
     fi
 }
@@ -325,7 +347,7 @@ find_control_port() {
 
 install_missing_packages() {
     local missing=()
-    for cmd in tor curl nc ss pgrep pkill dialog wget; do
+    for cmd in tor curl nc ss pgrep pkill dialog wget file; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -347,6 +369,7 @@ install_missing_packages() {
         ["pkill"]="procps"
         ["dialog"]="dialog"
         ["wget"]="wget"
+        ["file"]="file"
     )
 
     local pkgs=()
@@ -389,7 +412,7 @@ check_prerequisites() {
 }
 
 create_dirs() {
-    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$PSIPHON_CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$PSIPHON_CONFIG_DIR" "$PSIPHON_DATA_DIR"
     
     if [ -f "$AVAILABLE_FILE" ]; then
         declare -A existing
