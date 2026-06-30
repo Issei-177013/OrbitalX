@@ -328,6 +328,7 @@ tor_create_instance() {
     local log_file="${LOG_DIR}/tor_${instance_id}.log"
     local service_file="/etc/systemd/system/orbitalx-tor-${instance_id}.service"
     local torrc_file="${data_dir}/torrc"
+    local result_file="/tmp/orbitalx_create_result_$$"
 
     mkdir -p "$data_dir"
 
@@ -411,6 +412,15 @@ EOF
     echo "${instance_id}:TOR:${country}:${port}:${control_port}:${exit_ip}:active" >> "$INSTANCES_FILE"
     log_info "Created Tor instance ${instance_id} on port ${port} with IP ${exit_ip}"
     print_info "✅ Tor ${instance_id} created (${get_full_name "$country"}) on port ${port}"
+
+    # Save result details for TUI
+    echo "instance_id=${instance_id}" > "$result_file"
+    echo "port=${port}" >> "$result_file"
+    echo "exit_ip=${exit_ip}" >> "$result_file"
+    echo "country=${country}" >> "$result_file"
+    echo "type=TOR" >> "$result_file"
+    echo "control_port=${control_port}" >> "$result_file"
+
     return 0
 }
 
@@ -473,6 +483,7 @@ psiphon_create_instance() {
     local socks_port=$(get_next_port_psiphon_socks)
     local http_port=$(get_next_port_psiphon_http)
     local instance_id=$(generate_instance_id "PSIPHON" "$country")
+    local result_file="/tmp/orbitalx_create_result_$$"
 
     # Validate region
     local valid=0
@@ -545,6 +556,14 @@ EOF
     echo "${instance_id}:PSIPHON:${country}:${socks_port}:${http_port}:active" >> "$INSTANCES_FILE"
     log_info "Created Psiphon instance ${instance_id} (SOCKS: $socks_port, HTTP: $http_port)"
     print_info "✅ Psiphon ${instance_id} created (${get_full_name "$country"}) on SOCKS $socks_port"
+
+    # Save result details for TUI
+    echo "instance_id=${instance_id}" > "$result_file"
+    echo "socks_port=${socks_port}" >> "$result_file"
+    echo "http_port=${http_port}" >> "$result_file"
+    echo "country=${country}" >> "$result_file"
+    echo "type=PSIPHON" >> "$result_file"
+
     return 0
 }
 
@@ -671,6 +690,7 @@ create_tor_tui() {
         2>&1 >/dev/tty)
 
     if [ -n "$country" ]; then
+        local result_file="/tmp/orbitalx_create_result_$$"
         (
             set +e
             tor_create_instance "$country" > /tmp/orbitalx_create.log 2>&1
@@ -680,8 +700,17 @@ create_tor_tui() {
         dialog --title "Creating Tor instance..." --infobox "Please wait..." 5 40
         wait $pid
         exit_code=$(cat /tmp/orbitalx_create.exit 2>/dev/null || echo 1)
-        if [ $exit_code -eq 0 ]; then
-            dialog --msgbox "✅ Tor instance created successfully!" 6 40
+        if [ $exit_code -eq 0 ] && [ -f "$result_file" ]; then
+            source "$result_file"
+            local msg="✅ Tor instance created successfully!\n\n"
+            msg+="Instance ID: ${instance_id}\n"
+            msg+="Country: $(get_full_name "$country")\n"
+            msg+="Port: ${port}\n"
+            msg+="Exit IP: ${exit_ip}\n"
+            msg+="Control Port: ${control_port}\n\n"
+            msg+="Use this port in Xray outbound: 127.0.0.1:${port}"
+            dialog --msgbox "$msg" 12 60
+            rm -f "$result_file"
         else
             show_error_tui
         fi
@@ -705,6 +734,7 @@ create_psiphon_tui() {
         2>&1 >/dev/tty)
 
     if [ -n "$country" ]; then
+        local result_file="/tmp/orbitalx_create_result_$$"
         (
             set +e
             psiphon_create_instance "$country" > /tmp/orbitalx_create.log 2>&1
@@ -714,8 +744,16 @@ create_psiphon_tui() {
         dialog --title "Creating Psiphon instance..." --infobox "Please wait..." 5 40
         wait $pid
         exit_code=$(cat /tmp/orbitalx_create.exit 2>/dev/null || echo 1)
-        if [ $exit_code -eq 0 ]; then
-            dialog --msgbox "✅ Psiphon instance created successfully!" 6 40
+        if [ $exit_code -eq 0 ] && [ -f "$result_file" ]; then
+            source "$result_file"
+            local msg="✅ Psiphon instance created successfully!\n\n"
+            msg+="Instance ID: ${instance_id}\n"
+            msg+="Country: $(get_full_name "$country")\n"
+            msg+="SOCKS Port: ${socks_port}\n"
+            msg+="HTTP Port: ${http_port}\n\n"
+            msg+="Use SOCKS port in Xray outbound: 127.0.0.1:${socks_port}"
+            dialog --msgbox "$msg" 12 60
+            rm -f "$result_file"
         else
             show_error_tui
         fi
