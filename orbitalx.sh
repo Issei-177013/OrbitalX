@@ -174,13 +174,23 @@ check_root() {
     fi
 }
 
+# ==================== INSTALLATION CHECK ====================
+
+is_installed() {
+    local installed_path="/usr/local/bin/orbitalx"
+    if [ -f "$installed_path" ] && [ "$(realpath "$0" 2>/dev/null)" = "$(realpath "$installed_path" 2>/dev/null)" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # ==================== PSIPHON FUNCTIONS ====================
 
 convert_dat_to_entries() {
     local dat_file="$1"
     local entries_file="$2"
     
-    # Method 1: Use psiphon-tunnel-core binary if available
     if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ]; then
         print_info "Converting server_list.dat using psiphon-tunnel-core..."
         if "$PSIPHON_BIN" -serverList > "$entries_file" 2>/dev/null && [ -s "$entries_file" ]; then
@@ -190,21 +200,17 @@ convert_dat_to_entries() {
         print_warn "psiphon-tunnel-core conversion failed."
     fi
 
-    # Method 2: Use Python with protobuf
     if command -v python3 &> /dev/null; then
-        # Check if protobuf is installed
         if python3 -c "import google.protobuf" 2>/dev/null; then
             print_info "Converting server_list.dat using Python + protobuf..."
             cat > /tmp/convert_psiphon.py << 'EOF'
 import sys
 import json
 import struct
-import os
 
 def parse_server_list_dat(file_path):
     with open(file_path, 'rb') as f:
         data = f.read()
-    
     entries = []
     i = 0
     while i < len(data):
@@ -221,19 +227,16 @@ def parse_server_list_dat(file_path):
             entries.append(entry)
         except:
             continue
-    
     return entries
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python3 convert_psiphon.py <input.dat> <output.txt>")
         sys.exit(1)
-    
     entries = parse_server_list_dat(sys.argv[1])
     with open(sys.argv[2], 'w') as f:
         for entry in entries:
             f.write(json.dumps(entry) + '\n')
-    
     print(f"Converted {len(entries)} entries")
 EOF
             if python3 /tmp/convert_psiphon.py "$dat_file" "$entries_file" && [ -s "$entries_file" ]; then
@@ -246,7 +249,6 @@ EOF
             print_info "protobuf not installed. Attempting to install..."
             if pip3 install protobuf 2>/dev/null || python3 -m pip install protobuf 2>/dev/null; then
                 print_info "protobuf installed. Retrying conversion..."
-                # Recursive call with protobuf now installed
                 convert_dat_to_entries "$dat_file" "$entries_file"
                 return $?
             else
@@ -261,13 +263,11 @@ EOF
 prepare_psiphon_server_entries() {
     mkdir -p "$PSIPHON_CONFIG_DIR"
     
-    # If server_entries.txt already exists and is not empty, use it
     if [ -f "$PSIPHON_SERVER_ENTRIES_FILE" ] && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
         print_info "Using existing server_entries.txt"
         return 0
     fi
 
-    # If server_list.dat exists, try to convert it
     if [ -f "$PSIPHON_SERVER_DAT_FILE" ] && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
         print_info "Found server_list.dat. Attempting to convert..."
         if convert_dat_to_entries "$PSIPHON_SERVER_DAT_FILE" "$PSIPHON_SERVER_ENTRIES_FILE"; then
@@ -276,7 +276,6 @@ prepare_psiphon_server_entries() {
             print_warn "Conversion failed. Trying to download from repository..."
         fi
     else
-        # Try to download server_list.dat from repository
         print_info "Downloading server_list.dat from repository..."
         if curl -sL -o "$PSIPHON_SERVER_DAT_FILE" "$REPO_SERVER_DAT_URL" && [ -s "$PSIPHON_SERVER_DAT_FILE" ]; then
             print_info "server_list.dat downloaded. Converting..."
@@ -288,21 +287,18 @@ prepare_psiphon_server_entries() {
         fi
     fi
 
-    # Fallback: download server_entries.txt directly from repository
     print_info "Downloading server_entries.txt from repository (fallback)..."
     if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$REPO_SERVER_ENTRIES_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
         print_info "server_entries.txt downloaded successfully from repository."
         return 0
     fi
 
-    # Final fallback: try official Psiphon server list
     print_warn "Could not get from repository. Trying official server list..."
     if curl -sL -o "$PSIPHON_SERVER_ENTRIES_FILE" "$PSIPHON_SERVER_LIST_URL" && [ -s "$PSIPHON_SERVER_ENTRIES_FILE" ]; then
         print_info "Server list downloaded from official source."
         return 0
     fi
 
-    # If all fails, give a clear error
     set_error "Could not obtain server_entries.txt. Please manually place it in $PSIPHON_SERVER_ENTRIES_FILE"
     return 1
 }
@@ -342,7 +338,6 @@ create_psiphon_config() {
 
     mkdir -p "$PSIPHON_CONFIG_DIR" "$data_dir"
 
-    # Ensure server entries are available
     if ! prepare_psiphon_server_entries; then
         return 1
     fi
@@ -528,15 +523,9 @@ install_missing_packages() {
 }
 
 check_prerequisites() {
-    if ! command -v dialog &> /dev/null; then
-        print_info "Dialog is not installed. Installing..."
-        apt update -y && apt install -y dialog
-    fi
-
     if ! install_missing_packages; then
         return 1
     fi
-
     return 0
 }
 
@@ -1367,6 +1356,27 @@ EOF
 if [ $# -eq 0 ]; then
     TUI_MODE=1
     check_root
+
+    # If not installed, auto-install with user confirmation
+    if ! is_installed; then
+        echo "OrbitalX is not installed on this system."
+        echo "It will be installed to /usr/local/bin/orbitalx and set up as a systemd service."
+        read -p "Do you want to continue with installation? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if install_core; then
+                echo "Installation successful. Restarting OrbitalX..."
+                exec /usr/local/bin/orbitalx
+            else
+                echo "Installation failed. See errors above."
+                exit 1
+            fi
+        else
+            echo "Installation cancelled. To install manually, run: sudo orbitalx install"
+            exit 0
+        fi
+    fi
+
     create_dirs
     check_prerequisites || exit 1
     main_menu
