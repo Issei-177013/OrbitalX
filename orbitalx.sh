@@ -177,6 +177,13 @@ check_root() {
 # ==================== INSTALLATION CHECK ====================
 
 is_installed() {
+    # اگر اسکریپت از stdin یا pipe اجرا می‌شود، فقط وجود فایل را بررسی کن
+    if [ ! -t 0 ] || [ -p /dev/stdin ] || [ "$0" = "bash" ] || [[ "$0" == *"/dev/fd/"* ]]; then
+        [ -f "/usr/local/bin/orbitalx" ] && [ -x "/usr/local/bin/orbitalx" ]
+        return $?
+    fi
+    
+    # در غیر این صورت، مسیر واقعی را مقایسه کن
     local installed_path="/usr/local/bin/orbitalx"
     if [ -f "$installed_path" ] && [ "$(realpath "$0" 2>/dev/null)" = "$(realpath "$installed_path" 2>/dev/null)" ]; then
         return 0
@@ -304,13 +311,12 @@ prepare_psiphon_server_entries() {
 }
 
 install_psiphon() {
-    # Check if already installed and valid
     if [ -f "$PSIPHON_BIN" ] && [ -x "$PSIPHON_BIN" ] && file "$PSIPHON_BIN" | grep -q "ELF"; then
         print_info "Psiphon binary already exists and is valid."
         return 0
     fi
 
-    print_info "Downloading Psiphon tunnel core from $PSIPHON_DOWNLOAD_URL..."
+    print_info "Downloading Psiphon tunnel core..."
     mkdir -p "$(dirname "$PSIPHON_BIN")"
     
     local tmp_file="/tmp/psiphon_download"
@@ -321,15 +327,15 @@ install_psiphon() {
             print_info "✅ Psiphon installed successfully."
             return 0
         else
-            print_error "Downloaded file is not a valid ELF binary (may be HTML or error page)."
+            print_error "Downloaded file is not a valid ELF binary."
             rm -f "$tmp_file"
             print_warn "Psiphon will not be available, but Tor mode will still work."
-            return 0   # Don't fail the entire installation; Tor still works
+            return 0
         fi
     else
-        print_error "Failed to download Psiphon (curl error)."
+        print_error "Failed to download Psiphon."
         print_warn "Psiphon will not be available, but Tor mode will still work."
-        return 0   # Don't fail
+        return 0
     fi
 }
 
@@ -1389,24 +1395,18 @@ if [ $# -eq 0 ]; then
     TUI_MODE=1
     check_root
 
-    # If not installed, auto-install with user confirmation
+    # اگر نصب نیست، پیام خطا بده و راهنمایی کن
     if ! is_installed; then
         echo "OrbitalX is not installed on this system."
-        echo "It will be installed to /usr/local/bin/orbitalx and set up as a systemd service."
-        read -p "Do you want to continue with installation? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            if install_core; then
-                echo "Installation successful. Restarting OrbitalX..."
-                exec /usr/local/bin/orbitalx
-            else
-                echo "Installation failed. See errors above."
-                exit 1
-            fi
-        else
-            echo "Installation cancelled. To install manually, run: sudo orbitalx install"
-            exit 0
-        fi
+        echo ""
+        echo "To install OrbitalX, use one of these methods:"
+        echo "  1. From CLI: sudo orbitalx install"
+        echo "  2. From TUI: Run 'sudo orbitalx' after installation, or from the menu:"
+        echo "     Administration → Install (full setup)"
+        echo ""
+        echo "If you are running this script from the web, use:"
+        echo "  bash <(curl -sL ...) install"
+        exit 1
     fi
 
     create_dirs
