@@ -1027,9 +1027,11 @@ install_tui() {
 }
 
 update_tui() {
-    dialog --infobox "Updating OrbitalX from GitHub..." 5 40
+    dialog --infobox "Checking for updates..." 5 40
     if update_core; then
-        dialog --msgbox "✅ Update completed successfully.\nService restarted." 6 40
+        # After successful update, show a message and reload
+        local new_version=$(get_version)
+        dialog --msgbox "✅ Update completed successfully!\n\nVersion: ${new_version}\n\nPlease restart OrbitalX to see the changes." 8 50
         exec /usr/local/bin/orbitalx
     else
         show_error_tui
@@ -1104,32 +1106,104 @@ EOF
 
 update_core() {
     check_root
+
+    local current_version=$(get_version)
+    print_info "Current version: $current_version"
+
+    # Fetch remote version
+    local remote_version=$(curl -sL "$REPO_RAW_URL_VERSION" 2>/dev/null | tr -d '\n\r')
+    if [ -z "$remote_version" ]; then
+        set_error "Failed to fetch remote version from GitHub."
+        return 1
+    fi
+    print_info "Latest version: $remote_version"
+
+    # Compare versions
+    if [ "$current_version" = "$remote_version" ]; then
+        print_info "You already have the latest version."
+        return 0
+    fi
+
+    # Check if newer (using sort -V)
+    if ! printf '%s\n' "$current_version" "$remote_version" | sort -V | head -n1 | grep -q "$remote_version"; then
+        print_warn "Local version is newer than remote? Continuing anyway."
+    fi
+
+    print_info "Updating from $current_version to $remote_version..."
+
+    # Determine script location
     local script_path=$(realpath "$0")
     local script_dir=$(dirname "$script_path")
+    local installed_path="/usr/local/bin/orbitalx"
 
+    # If we are inside a git repository, do git pull
     if [ -d "${script_dir}/.git" ]; then
+        print_info "Git repository detected. Pulling latest changes..."
         cd "$script_dir"
-        git pull
-        cp "$script_path" /usr/local/bin/orbitalx
-        chmod +x /usr/local/bin/orbitalx
-        systemctl restart orbitalx-monitor 2>/dev/null || true
-        VERSION=$(get_version)
-        print_info "Update successful."
-        return 0
-    else
-        print_info "Updating installed version from GitHub..."
-        local tmp_script="/tmp/orbitalx_update.sh"
-        curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script"
-        if [ $? -eq 0 ] && [ -s "$tmp_script" ]; then
-            chmod +x "$tmp_script"
-            mv "$tmp_script" /usr/local/bin/orbitalx
+        if git pull; then
+            print_info "Git pull successful."
+            # Update system installation if present
+            if [ -f "$installed_path" ]; then
+                cp "$script_path" "$installed_path"
+                chmod +x "$installed_path"
+                print_info "Updated $installed_path"
+            fi
+            # Update VERSION file in system location if present
+            if [ -f "$installed_path" ] && [ -f "$script_dir/VERSION" ]; then
+                cp "$script_dir/VERSION" "$(dirname "$installed_path")/VERSION"
+                print_info "Updated VERSION file"
+            fi
+            # Restart monitor service
             systemctl restart orbitalx-monitor 2>/dev/null || true
-            VERSION=$(get_version)
-            print_info "Update successful."
             return 0
         else
-            set_error "Failed to download script."
+            set_error "Git pull failed."
             return 1
+        fi
+    else
+        # Not in git repo: download from GitHub
+        print_info "Downloading latest version from GitHub..."
+        local tmp_script="/tmp/orbitalx_update.sh"
+        local tmp_version="/tmp/orbitalx_update_version"
+
+        if ! curl -sL "$REPO_RAW_URL_SCRIPT" -o "$tmp_script" || [ ! -s "$tmp_script" ]; then
+            set_error "Failed to download script."
+            rm -f "$tmp_script"
+            return 1
+        fi
+
+        if ! curl -sL "$REPO_RAW_URL_VERSION" -o "$tmp_version" || [ ! -s "$tmp_version" ]; then
+            print_warn "Failed to download VERSION file, keeping existing."
+        fi
+
+        # If the script is installed in /usr/local/bin, replace it
+        if [ -f "$installed_path" ]; then
+            chmod +x "$tmp_script"
+            mv "$tmp_script" "$installed_path"
+            print_info "Updated $installed_path"
+            if [ -f "$tmp_version" ]; then
+                mv "$tmp_version" "$(dirname "$installed_path")/VERSION"
+                print_info "Updated VERSION file"
+            fi
+            systemctl restart orbitalx-monitor 2>/dev/null || true
+            return 0
+        else
+            # Not installed: replace the current script itself
+            if [ -f "$tmp_script" ]; then
+                chmod +x "$tmp_script"
+                # Overwrite current script
+                cp "$tmp_script" "$script_path"
+                print_info "Updated script at $script_path"
+                if [ -f "$tmp_version" ]; then
+                    cp "$tmp_version" "$script_dir/VERSION"
+                    print_info "Updated VERSION file"
+                fi
+                rm -f "$tmp_script" "$tmp_version"
+                return 0
+            else
+                set_error "Update failed: cannot determine installation location."
+                return 1
+            fi
         fi
     fi
 }
