@@ -578,14 +578,24 @@ psiphon_create_instance() {
         set_error "Psiphon binary not found at $PSIPHON_BIN. Run 'orbitalx install' to install it."
         return 1
     fi
-    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
-        set_error "Psiphon config file not found at $PSIPHON_DEFAULT_CONFIG. Run 'orbitalx install' to install it."
-        return 1
-    fi
 
     # Test if binary works
     if ! "$PSIPHON_BIN" -version &>/dev/null; then
-        set_error "Psiphon binary does not seem to be executable. Check permissions or missing libraries."
+        # Try to diagnose
+        local missing_libs=""
+        if command -v ldd &>/dev/null; then
+            missing_libs=$(ldd "$PSIPHON_BIN" 2>/dev/null | grep "not found" | awk '{print $1}')
+        fi
+        if [ -n "$missing_libs" ]; then
+            set_error "Psiphon binary is not executable. Missing libraries: $missing_libs. Run 'orbitalx install' to reinstall."
+        else
+            set_error "Psiphon binary is not executable. Run 'orbitalx install' to reinstall."
+        fi
+        return 1
+    fi
+
+    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
+        set_error "Psiphon config file not found at $PSIPHON_DEFAULT_CONFIG. Run 'orbitalx install' to install it."
         return 1
     fi
 
@@ -1374,7 +1384,11 @@ cli_mode() {
                     created="${created} $country"
                 else
                     failed=$((failed + 1))
-                    print_error "Failed to create Tor instance for $country"
+                    if [ -n "$LAST_ERROR" ]; then
+                        print_error "Failed to create Tor instance for $country: $LAST_ERROR"
+                    else
+                        print_error "Failed to create Tor instance for $country (unknown error)"
+                    fi
                 fi
             done
             echo ""
@@ -1397,12 +1411,18 @@ cli_mode() {
             for country in "$@"; do
                 country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
                 print_info "Creating Psiphon instance for $country..."
+                # Clear LAST_ERROR before each attempt
+                LAST_ERROR=""
                 if psiphon_create_instance "$country"; then
                     success=$((success + 1))
                     created="${created} $country"
                 else
                     failed=$((failed + 1))
-                    print_error "Failed to create Psiphon instance for $country"
+                    if [ -n "$LAST_ERROR" ]; then
+                        print_error "Failed to create Psiphon instance for $country: $LAST_ERROR"
+                    else
+                        print_error "Failed to create Psiphon instance for $country (unknown error)"
+                    fi
                 fi
             done
             echo ""
@@ -1443,13 +1463,18 @@ cli_mode() {
                 echo "========================================"
 
                 # Create Tor instance
+                LAST_ERROR=""
                 print_info "Creating Tor instance for $country..."
                 if tor_create_instance "$country"; then
                     tor_success=$((tor_success + 1))
                     tor_created="${tor_created} $country"
                 else
                     tor_failed=$((tor_failed + 1))
-                    print_error "Tor instance for $country failed"
+                    if [ -n "$LAST_ERROR" ]; then
+                        print_error "Tor instance for $country failed: $LAST_ERROR"
+                    else
+                        print_error "Tor instance for $country failed"
+                    fi
                 fi
 
                 # Create Psiphon instance if supported
@@ -1462,13 +1487,18 @@ cli_mode() {
                 done
 
                 if [ $psiphon_supported -eq 1 ]; then
+                    LAST_ERROR=""
                     print_info "Creating Psiphon instance for $country..."
                     if psiphon_create_instance "$country"; then
                         psiphon_success=$((psiphon_success + 1))
                         psiphon_created="${psiphon_created} $country"
                     else
                         psiphon_failed=$((psiphon_failed + 1))
-                        print_error "Psiphon instance for $country failed"
+                        if [ -n "$LAST_ERROR" ]; then
+                            print_error "Psiphon instance for $country failed: $LAST_ERROR"
+                        else
+                            print_error "Psiphon instance for $country failed"
+                        fi
                     fi
                 else
                     psiphon_skipped=$((psiphon_skipped + 1))
