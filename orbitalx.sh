@@ -23,13 +23,13 @@ MONITOR_INTERVAL_FILE="${CONFIG_DIR}/monitor_interval.conf"
 DEFAULT_MONITOR_INTERVAL=600
 TUI_MODE=0
 
-# Psiphon specific - Using SpherionOS repository
+# Psiphon specific - Using SpherionOS repository for binary
 PSIPHON_BIN="/etc/psiphon/psiphon-tunnel-core-x86_64"
 PSIPHON_DEFAULT_CONFIG="/etc/psiphon/psiphon.config"
 PSIPHON_BASE_DIR="/etc/psiphon-instances"
 PSIPHON_VALID_REGIONS=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
 PSIPHON_BIN_URL="https://raw.githubusercontent.com/SpherionOS/PsiphonLinux/main/archive/psiphon-tunnel-core-x86_64"
-PSIPHON_CONFIG_URL="https://raw.githubusercontent.com/SpherionOS/PsiphonLinux/main/psiphon.config"
+# Note: We don't download config from URL, we generate it directly with correct fields.
 
 # Global error message for TUI
 LAST_ERROR=""
@@ -213,17 +213,18 @@ install_missing_packages() {
     return 0
 }
 
-# Install Psiphon binary and default config from SpherionOS
+# Install Psiphon binary and default config with correct fields
 install_psiphon() {
     # Check if already installed and working
     if [ -f "$PSIPHON_BIN" ] && [ -f "$PSIPHON_DEFAULT_CONFIG" ]; then
         print_info "Psiphon already installed. Checking if it works..."
-        if "$PSIPHON_BIN" -version &>/dev/null; then
-            print_info "Psiphon binary is working correctly."
+        # Also check if config has RemoteServerListUrl (essential)
+        if "$PSIPHON_BIN" -version &>/dev/null && grep -q "RemoteServerListUrl" "$PSIPHON_DEFAULT_CONFIG"; then
+            print_info "✅ Psiphon binary and config are working correctly. Skipping installation."
             return 0
         else
-            print_warn "Existing Psiphon binary is not working. Reinstalling..."
-            rm -f "$PSIPHON_BIN"
+            print_warn "Existing Psiphon binary or config is not working/correct. Reinstalling..."
+            rm -f "$PSIPHON_BIN" "$PSIPHON_DEFAULT_CONFIG"
         fi
     fi
 
@@ -269,10 +270,9 @@ install_psiphon() {
     mv "$tmp_bin" "$PSIPHON_BIN"
     print_info "✅ Psiphon binary installed to $PSIPHON_BIN"
 
-    # Create default config if missing
-    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
-        print_info "Creating default Psiphon config with correct protocol (SSH)..."
-        cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
+    # Create default config with correct fields (matching working server)
+    print_info "Creating default Psiphon config with RemoteServerListUrl..."
+    cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
 {
   "LocalHttpProxyPort": 8081,
   "LocalSocksProxyPort": 1081,
@@ -280,19 +280,12 @@ install_psiphon() {
   "PropagationChannelId": "FFFFFFFFFFFFFFFF",
   "RemoteServerListDownloadFilename": "remote_server_list",
   "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
+  "RemoteServerListUrl": "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed",
   "SponsorId": "FFFFFFFFFFFFFFFF",
-  "ClientVersion": "1",
-  "ClientPlatform": "Windows",
-  "TunnelProtocol": "SSH",
-  "UseIndicatorProtocol": true,
-  "DNS": {
-    "DNSServers": ["1.1.1.1", "8.8.8.8"],
-    "Domain": "lan"
-  }
+  "UseIndistinguishableTLS": true
 }
 EOF
-        print_info "✅ Psiphon default config created at $PSIPHON_DEFAULT_CONFIG"
-    fi
+    print_info "✅ Psiphon default config created at $PSIPHON_DEFAULT_CONFIG"
 
     # Final verification
     if ! "$PSIPHON_BIN" -version &>/dev/null; then
