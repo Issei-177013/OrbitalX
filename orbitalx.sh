@@ -23,12 +23,13 @@ MONITOR_INTERVAL_FILE="${CONFIG_DIR}/monitor_interval.conf"
 DEFAULT_MONITOR_INTERVAL=600
 TUI_MODE=0
 
-# Psiphon specific
+# Psiphon specific - Using SpherionOS repository
 PSIPHON_BIN="/etc/psiphon/psiphon-tunnel-core-x86_64"
 PSIPHON_DEFAULT_CONFIG="/etc/psiphon/psiphon.config"
 PSIPHON_BASE_DIR="/etc/psiphon-instances"
 PSIPHON_VALID_REGIONS=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
-PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Inc/psiphon-tunnel-core-binaries/raw/master/psiphon-tunnel-core-x86_64"
+PSIPHON_BIN_URL="https://raw.githubusercontent.com/SpherionOS/PsiphonLinux/main/archive/psiphon-tunnel-core-x86_64"
+PSIPHON_CONFIG_URL="https://raw.githubusercontent.com/SpherionOS/PsiphonLinux/main/psiphon.config"
 
 # Global error message for TUI
 LAST_ERROR=""
@@ -212,40 +213,72 @@ install_missing_packages() {
     return 0
 }
 
-# Install Psiphon binary and default config
+# Install Psiphon binary and default config from SpherionOS
 install_psiphon() {
-    # Check if already installed
+    # Check if already installed and working
     if [ -f "$PSIPHON_BIN" ] && [ -f "$PSIPHON_DEFAULT_CONFIG" ]; then
-        print_info "Psiphon already installed."
-        return 0
+        print_info "Psiphon already installed. Checking if it works..."
+        if "$PSIPHON_BIN" -version &>/dev/null; then
+            print_info "Psiphon binary is working correctly."
+            return 0
+        else
+            print_warn "Existing Psiphon binary is not working. Reinstalling..."
+            rm -f "$PSIPHON_BIN"
+        fi
     fi
 
-    print_info "Installing Psiphon tunnel core..."
+    print_info "Installing Psiphon tunnel core from SpherionOS repository..."
 
     # Ensure directory exists
     mkdir -p "$(dirname "$PSIPHON_BIN")"
 
     # Download binary
     local tmp_bin="/tmp/psiphon-tunnel-core-x86_64"
-    if ! curl -sL "$PSIPHON_DOWNLOAD_URL" -o "$tmp_bin"; then
-        set_error "Failed to download Psiphon binary."
+    if ! curl -sL "$PSIPHON_BIN_URL" -o "$tmp_bin"; then
+        set_error "Failed to download Psiphon binary from $PSIPHON_BIN_URL"
         return 1
     fi
-    chmod +x "$tmp_bin"
-    mv "$tmp_bin" "$PSIPHON_BIN"
-    print_info "Psiphon binary installed to $PSIPHON_BIN"
 
-    # Check binary dependencies
-    if command -v ldd &>/dev/null; then
-        if ldd "$PSIPHON_BIN" | grep -q "not found"; then
-            print_warn "Psiphon binary has missing libraries. Please install required libraries."
-            ldd "$PSIPHON_BIN" | grep "not found"
+    if [ ! -s "$tmp_bin" ]; then
+        set_error "Downloaded Psiphon binary is empty."
+        return 1
+    fi
+
+    chmod +x "$tmp_bin"
+
+    # Test the binary immediately
+    print_info "Testing downloaded binary..."
+    if ! "$tmp_bin" -version &>/dev/null; then
+        print_warn "Binary test failed. Checking dependencies..."
+        if command -v ldd &>/dev/null; then
+            print_info "Missing libraries:"
+            ldd "$tmp_bin" | grep "not found" || echo "  (none found)"
+        fi
+        # Install common missing libraries
+        print_info "Installing common libraries for Psiphon..."
+        apt update -y
+        apt install -y libc6 libstdc++6 libgcc-s1 2>/dev/null || true
+        # Try again
+        if ! "$tmp_bin" -version &>/dev/null; then
+            set_error "Psiphon binary still not working after installing libraries."
+            rm -f "$tmp_bin"
+            return 1
         fi
     fi
 
+    mv "$tmp_bin" "$PSIPHON_BIN"
+    print_info "✅ Psiphon binary installed to $PSIPHON_BIN"
+
     # Create default config if missing
     if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
-        cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
+        print_info "Downloading default config from SpherionOS..."
+        local tmp_config="/tmp/psiphon.config"
+        if curl -sL "$PSIPHON_CONFIG_URL" -o "$tmp_config" && [ -s "$tmp_config" ]; then
+            mv "$tmp_config" "$PSIPHON_DEFAULT_CONFIG"
+            print_info "✅ Psiphon config installed to $PSIPHON_DEFAULT_CONFIG"
+        else
+            print_warn "Failed to download config from SpherionOS. Creating fallback config..."
+            cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
 {
   "LocalSocksProxyPort": 1080,
   "LocalHttpProxyPort": 8080,
@@ -260,9 +293,17 @@ install_psiphon() {
   }
 }
 EOF
-        print_info "Default Psiphon config created at $PSIPHON_DEFAULT_CONFIG"
+            print_info "Fallback Psiphon config created at $PSIPHON_DEFAULT_CONFIG"
+        fi
     fi
 
+    # Final verification
+    if ! "$PSIPHON_BIN" -version &>/dev/null; then
+        set_error "Psiphon installation failed final verification."
+        return 1
+    fi
+
+    print_info "✅ Psiphon installation complete and verified."
     return 0
 }
 
@@ -279,7 +320,7 @@ check_prerequisites() {
     # Attempt to install Psiphon automatically
     if ! install_psiphon; then
         print_warn "Psiphon installation failed. Psiphon support may be limited."
-        print_info "You can manually install Psiphon from: https://github.com/Psiphon-Inc/psiphon-tunnel-core-binaries"
+        print_info "You can manually install Psiphon from: https://github.com/SpherionOS/PsiphonLinux"
     fi
 
     return 0
@@ -1551,7 +1592,7 @@ Examples:
   orbitalx remove TOR-US-1
   orbitalx start PSIPHON-DE-1
 
-Note: Psiphon binaries and config are installed automatically when needed.
+Note: Psiphon binary is automatically installed from SpherionOS repository.
 Run without arguments for TUI menu.
 EOF
             ;;
