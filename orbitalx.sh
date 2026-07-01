@@ -235,6 +235,14 @@ install_psiphon() {
     mv "$tmp_bin" "$PSIPHON_BIN"
     print_info "Psiphon binary installed to $PSIPHON_BIN"
 
+    # Check binary dependencies
+    if command -v ldd &>/dev/null; then
+        if ldd "$PSIPHON_BIN" | grep -q "not found"; then
+            print_warn "Psiphon binary has missing libraries. Please install required libraries."
+            ldd "$PSIPHON_BIN" | grep "not found"
+        fi
+    fi
+
     # Create default config if missing
     if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
         cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
@@ -534,6 +542,12 @@ psiphon_create_instance() {
         return 1
     fi
 
+    # Test if binary works
+    if ! "$PSIPHON_BIN" -version &>/dev/null; then
+        set_error "Psiphon binary does not seem to be executable. Check permissions or missing libraries."
+        return 1
+    fi
+
     local socks_port=$(get_next_port_psiphon_socks)
     local http_port=$(get_next_port_psiphon_http)
     local instance_id=$(generate_instance_id "PSIPHON" "$country")
@@ -598,9 +612,12 @@ EOF
     systemctl enable "orbitalx-psiphon-${instance_id}"
     systemctl start "orbitalx-psiphon-${instance_id}"
 
-    sleep 3
+    # Wait a bit and check status
+    sleep 5
     if ! systemctl is-active --quiet "orbitalx-psiphon-${instance_id}"; then
-        set_error "Psiphon instance ${instance_id} failed to start"
+        # Get last few lines from journal for this service
+        local error_log=$(journalctl -u "orbitalx-psiphon-${instance_id}" --no-pager -n 10 2>/dev/null | tail -5)
+        set_error "Psiphon instance ${instance_id} failed to start. Last logs:\n${error_log}"
         systemctl disable "orbitalx-psiphon-${instance_id}" 2>/dev/null
         rm -f "$service_file"
         rm -rf "$instance_dir"
