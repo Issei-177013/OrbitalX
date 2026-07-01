@@ -28,6 +28,7 @@ PSIPHON_BIN="/etc/psiphon/psiphon-tunnel-core-x86_64"
 PSIPHON_DEFAULT_CONFIG="/etc/psiphon/psiphon.config"
 PSIPHON_BASE_DIR="/etc/psiphon-instances"
 PSIPHON_VALID_REGIONS=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
+PSIPHON_DOWNLOAD_URL="https://github.com/Psiphon-Inc/psiphon-tunnel-core-binaries/raw/master/psiphon-tunnel-core-x86_64"
 
 # Global error message for TUI
 LAST_ERROR=""
@@ -211,6 +212,52 @@ install_missing_packages() {
     return 0
 }
 
+# Install Psiphon binary and default config
+install_psiphon() {
+    # Check if already installed
+    if [ -f "$PSIPHON_BIN" ] && [ -f "$PSIPHON_DEFAULT_CONFIG" ]; then
+        print_info "Psiphon already installed."
+        return 0
+    fi
+
+    print_info "Installing Psiphon tunnel core..."
+
+    # Ensure directory exists
+    mkdir -p "$(dirname "$PSIPHON_BIN")"
+
+    # Download binary
+    local tmp_bin="/tmp/psiphon-tunnel-core-x86_64"
+    if ! curl -sL "$PSIPHON_DOWNLOAD_URL" -o "$tmp_bin"; then
+        set_error "Failed to download Psiphon binary."
+        return 1
+    fi
+    chmod +x "$tmp_bin"
+    mv "$tmp_bin" "$PSIPHON_BIN"
+    print_info "Psiphon binary installed to $PSIPHON_BIN"
+
+    # Create default config if missing
+    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
+        cat > "$PSIPHON_DEFAULT_CONFIG" << EOF
+{
+  "LocalSocksProxyPort": 1080,
+  "LocalHttpProxyPort": 8080,
+  "EgressRegion": "US",
+  "ListenInterface": "127.0.0.1",
+  "TunnelProtocol": "SSH+",
+  "UpstreamProxyUrl": "",
+  "UseIndicatorProtocol": true,
+  "DNS": {
+    "DNSServers": ["1.1.1.1", "8.8.8.8"],
+    "Domain": "lan"
+  }
+}
+EOF
+        print_info "Default Psiphon config created at $PSIPHON_DEFAULT_CONFIG"
+    fi
+
+    return 0
+}
+
 check_prerequisites() {
     if ! command -v dialog &> /dev/null; then
         print_info "Dialog is not installed. Installing..."
@@ -221,14 +268,10 @@ check_prerequisites() {
         return 1
     fi
 
-    # Check Psiphon prerequisites
-    if [ ! -f "$PSIPHON_BIN" ]; then
-        print_warn "Psiphon binary not found at $PSIPHON_BIN"
-        print_info "Psiphon support will be disabled. Install it to use Psiphon."
-    fi
-    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
-        print_warn "Psiphon default config not found at $PSIPHON_DEFAULT_CONFIG"
-        print_info "Psiphon support will be disabled. Create it to use Psiphon."
+    # Attempt to install Psiphon automatically
+    if ! install_psiphon; then
+        print_warn "Psiphon installation failed. Psiphon support may be limited."
+        print_info "You can manually install Psiphon from: https://github.com/Psiphon-Inc/psiphon-tunnel-core-binaries"
     fi
 
     return 0
@@ -480,6 +523,17 @@ tor_show_log() {
 
 psiphon_create_instance() {
     local country=$1
+
+    # Check prerequisites for Psiphon
+    if [ ! -f "$PSIPHON_BIN" ]; then
+        set_error "Psiphon binary not found at $PSIPHON_BIN. Run 'orbitalx install' to install it."
+        return 1
+    fi
+    if [ ! -f "$PSIPHON_DEFAULT_CONFIG" ]; then
+        set_error "Psiphon config file not found at $PSIPHON_DEFAULT_CONFIG. Run 'orbitalx install' to install it."
+        return 1
+    fi
+
     local socks_port=$(get_next_port_psiphon_socks)
     local http_port=$(get_next_port_psiphon_http)
     local instance_id=$(generate_instance_id "PSIPHON" "$country")
@@ -1029,7 +1083,6 @@ install_tui() {
 update_tui() {
     dialog --infobox "Checking for updates..." 5 40
     if update_core; then
-        # After successful update, show a message and reload
         local new_version=$(get_version)
         dialog --msgbox "✅ Update completed successfully!\n\nVersion: ${new_version}\n\nPlease restart OrbitalX to see the changes." 8 50
         exec /usr/local/bin/orbitalx
@@ -1481,6 +1534,7 @@ Examples:
   orbitalx remove TOR-US-1
   orbitalx start PSIPHON-DE-1
 
+Note: Psiphon binaries and config are installed automatically when needed.
 Run without arguments for TUI menu.
 EOF
             ;;
